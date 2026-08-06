@@ -1,0 +1,27 @@
+{
+  "site_name": "BPO AI Platform Pilot",
+  "database_name": "BPO Platform DB",
+  "dashboard_name": "BPO Pilot Overview",
+  "questions": [
+    {
+      "name": "Call Volume Over Time",
+      "display": "line",
+      "sql": "SELECT date_trunc('day', started_at) AS day, count(*) AS calls FROM calls GROUP BY 1 ORDER BY 1"
+    },
+    {
+      "name": "Average QA Score by Agent",
+      "display": "bar",
+      "sql": "SELECT c.agent_ext, round(avg(q.overall_score), 1) AS avg_score, count(*) AS calls_scored FROM qa_scores q JOIN calls c ON c.call_id = q.call_id GROUP BY 1 ORDER BY 2 DESC"
+    },
+    {
+      "name": "Flagged Calls (Needs Review)",
+      "display": "table",
+      "sql": "SELECT c.call_id, c.agent_ext, c.started_at, q.overall_score, q.notes FROM qa_scores q JOIN calls c ON c.call_id = q.call_id WHERE q.flagged = true ORDER BY c.started_at DESC"
+    },
+    {
+      "name": "Real-time Assist Trigger Frequency",
+      "display": "line",
+      "sql": "SELECT date_trunc('hour', created_at) AS hour, count(*) AS prompts FROM realtime_prompts GROUP BY 1 ORDER BY 1"
+    }
+  ]
+}
