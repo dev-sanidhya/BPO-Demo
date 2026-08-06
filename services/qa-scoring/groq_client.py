@@ -1,4 +1,7 @@
-"""Thin wrapper around the Groq SDK for transcription and QA scoring."""
+"""Thin wrapper around the Groq SDK for QA scoring. Transcription itself
+happens in the realtime-assist service (see services/realtime-assist/
+prompt_engine.py) — qa-scoring scores the transcript chunks it already
+wrote to Postgres rather than re-transcribing audio."""
 import json
 import os
 
@@ -13,19 +16,6 @@ def client() -> Groq:
         api_key = os.environ["GROQ_API_KEY"]
         _client = Groq(api_key=api_key)
     return _client
-
-
-def transcribe_file(path: str) -> str:
-    """Full post-call transcription. Quality matters more than speed here,
-    so we use the same whisper-large-v3-turbo model as real-time (it's both
-    fast and accurate) rather than trading accuracy for extra speed."""
-    with open(path, "rb") as f:
-        result = client().audio.transcriptions.create(
-            file=(os.path.basename(path), f.read()),
-            model="whisper-large-v3-turbo",
-            response_format="text",
-        )
-    return str(result)
 
 
 def score_transcript(transcript: str, rubric_prompt: str) -> dict:

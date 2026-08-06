@@ -18,11 +18,10 @@ def fetch_calls_pending_scoring(conn, limit: int = 5):
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT c.call_id, c.recording_path
+            SELECT c.call_id
             FROM calls c
             LEFT JOIN qa_scores q ON q.call_id = c.call_id
             WHERE c.ended_at IS NOT NULL
-              AND c.recording_path IS NOT NULL
               AND q.call_id IS NULL
             ORDER BY c.ended_at ASC
             LIMIT %s
@@ -32,16 +31,18 @@ def fetch_calls_pending_scoring(conn, limit: int = 5):
         return cur.fetchall()
 
 
-def insert_transcript(conn, call_id: str, chunk_index: int, text: str):
-    with conn.cursor() as cur:
+def fetch_transcript_chunks(conn, call_id: str):
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
-            INSERT INTO transcripts (call_id, chunk_index, text)
-            VALUES (%s, %s, %s)
+            SELECT chunk_index, text
+            FROM transcripts
+            WHERE call_id = %s
+            ORDER BY chunk_index ASC
             """,
-            (call_id, chunk_index, text),
+            (call_id,),
         )
-    conn.commit()
+        return cur.fetchall()
 
 
 def insert_qa_score(conn, call_id: str, scores: dict):

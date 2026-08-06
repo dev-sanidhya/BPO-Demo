@@ -22,8 +22,6 @@ services:
       - "8088:8088"
       - "8089:8089"
       - "10000-10099:10000-10099/udp"
-    volumes:
-      - recordings:/var/spool/asterisk/monitor
     restart: unless-stopped
 
   qa-scoring:
@@ -35,8 +33,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_HOST: ${POSTGRES_HOST}
       POSTGRES_PORT: ${POSTGRES_PORT}
-    volumes:
-      - recordings:/recordings:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -105,5 +101,4 @@ services:
 
 volumes:
   pgdata:
-  recordings:
   metabase-data:
