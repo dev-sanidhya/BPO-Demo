@@ -28,10 +28,23 @@ def originate_test_call(hold_seconds: float) -> str:
     resp = requests.post(
         f"{ARI_URL}/channels",
         auth=auth,
-        params={"endpoint": "Local/autotest@internal"},
+        # ARI requires an explicit extension+context (or `app`) even when
+        # the endpoint string is a fully-qualified Local channel — passing
+        # only `endpoint` returns 400 "Application or extension must be
+        # specified". Confirmed against a live Asterisk 20 instance.
+        params={
+            "endpoint": "Local/autotest@internal",
+            "extension": "autotest",
+            "context": "internal",
+        },
         timeout=10,
     )
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        try:
+            detail = resp.json().get("message", resp.text)
+        except ValueError:
+            detail = resp.text
+        raise requests.HTTPError(f"{resp.status_code} from Asterisk ARI: {detail}", response=resp)
     channel = resp.json()
     channel_id = channel["id"]
     print(f"Originated test call. Asterisk channel id: {channel_id}")

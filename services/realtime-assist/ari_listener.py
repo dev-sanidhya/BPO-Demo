@@ -93,24 +93,45 @@ class AriListener:
         )
 
     async def _event_loop(self, ws_url: str) -> None:
-        log.info("connecting to ARI websocket at %s", ws_url)
-        async with self._session.ws_connect(ws_url) as ws:
-            log.info("connected, listening for calls in app '%s'", ARI_APP)
-            async for msg in ws:
-                if msg.type != aiohttp.WSMsgType.TEXT:
-                    continue
-                try:
-                    event = json.loads(msg.data)
-                    await self._handle_event(event)
-                except Exception:
-                    log.exception("failed to handle ARI event: %s", msg.data)
+        """Reconnects with backoff on any disconnect (Asterisk restart, network
+        blip, etc.) — confirmed live that without this, a dropped websocket
+        just goes silent forever: the process keeps running (ws_server is a
+        separate task in the same gather()) but stops processing any calls,
+        with no crash and no error logged. That's worse than crashing."""
+        backoff = 1
+        while True:
+            try:
+                log.info("connecting to ARI websocket at %s", ws_url)
+                async with self._session.ws_connect(ws_url) as ws:
+                    log.info("connected, listening for calls in app '%s'", ARI_APP)
+                    backoff = 1
+                    async for msg in ws:
+                        if msg.type != aiohttp.WSMsgType.TEXT:
+                            continue
+                        try:
+                            event = json.loads(msg.data)
+                            await self._handle_event(event)
+                        except Exception:
+                            log.exception("failed to handle ARI event: %s", msg.data)
+                log.warning("ARI websocket closed, reconnecting in %ss", backoff)
+            except Exception:
+                log.exception("ARI websocket connection failed, retrying in %ss", backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
 
     async def _handle_event(self, event: dict) -> None:
         etype = event.get("type")
         if etype == "StasisStart":
             await self._on_stasis_start(event)
-        elif etype == "StasisEnd":
-            await self._on_stasis_end(event)
+        elif etype == "ChannelDestroyed":
+            # Confirmed live: StasisEnd fires the instant we call `continue`
+            # to hand the channel back to the dialplan — milliseconds into
+            # the call, not at hangup. Using it for cleanup was tearing down
+            # the Snoop/External Media bridge and marking the call "ended"
+            # before Playback/Dial even started, so the realtime-assist tap
+            # never captured anything. ChannelDestroyed fires at the actual
+            # hangup, once MixMonitor has finished writing the recording.
+            await self._on_channel_destroyed(event)
 
     async def _on_stasis_start(self, event: dict) -> None:
         channel = event["channel"]
@@ -170,7 +191,7 @@ class AriListener:
         # Hand control back to the dialplan so Dial()/Playback() proceeds.
         await self._rest("POST", f"/channels/{channel_id}/continue")
 
-    async def _on_stasis_end(self, event: dict) -> None:
+    async def _on_channel_destroyed(self, event: dict) -> None:
         channel_id = event["channel"]["id"]
         call_id = self._channel_to_call.pop(channel_id, None)
         if not call_id:
@@ -190,9 +211,8 @@ class AriListener:
                 except Exception:
                     pass  # Asterisk usually tears these down on its own already
 
-        recording_path = f"{call_id}.wav"
         log.info("call ended: call_id=%s", call_id)
-        await self._db_call(db.mark_call_ended, call_id, recording_path)
+        await self._db_call(db.mark_call_ended, call_id)
 
     async def _on_chunk_ready(self, call_id: str, chunk_index: int, wav_bytes: bytes) -> None:
         transcript = await self._loop.run_in_executor(

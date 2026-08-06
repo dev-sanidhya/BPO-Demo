@@ -27,15 +27,15 @@ def upsert_call_started(conn, call_id: str, call_type: str, agent_ext: str | Non
     conn.commit()
 
 
-def mark_call_ended(conn, call_id: str, recording_path: str):
+def mark_call_ended(conn, call_id: str):
     with conn.cursor() as cur:
         cur.execute(
             """
             UPDATE calls
-            SET ended_at = now(), recording_path = %s
+            SET ended_at = now()
             WHERE call_id = %s
             """,
-            (recording_path, call_id),
+            (call_id,),
         )
     conn.commit()
 
