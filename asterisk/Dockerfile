@@ -1,14 +1,23 @@
-FROM debian:bookworm-slim
+# Debian bookworm's 'main' apt repo ships no prebuilt asterisk package
+# (confirmed directly), and building Asterisk + PJSIP (with the right SRTP/
+# WebRTC flags chan_pjsip needs) from source is its own multi-step build
+# most teams don't hand-roll from scratch. andrius/asterisk is a
+# well-maintained, actively updated community image that ships Asterisk 20
+# with chan_pjsip, ARI (incl. res_stasis_snoop, res_ari_channels for
+# External Media), and WebRTC support already compiled in, at the standard
+# /etc/asterisk config path — exactly what our conf/ overrides expect.
+FROM andrius/asterisk:20
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        asterisk \
-        asterisk-config \
-        ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Recordings volume shared with qa-scoring service
-RUN mkdir -p /var/spool/asterisk/monitor && chown -R asterisk:asterisk /var/spool/asterisk
+# This image ships with an empty /var/lib/asterisk/sounds — confirmed by
+# inspecting a running container (0 files). Without core sounds,
+# Playback(demo-congrats) etc. silently fail ("File ... does not exist"),
+# which breaks scripts/make_test_call.py's whole premise: no audio ever
+# gets generated for the realtime-assist tap or the recording to transcribe.
+RUN mkdir -p /var/lib/asterisk/sounds/en \
+    && curl -sL https://downloads.asterisk.org/pub/telephony/sounds/asterisk-core-sounds-en-wav-current.tar.gz \
+        -o /tmp/core-sounds.tar.gz \
+    && tar xzf /tmp/core-sounds.tar.gz -C /var/lib/asterisk/sounds/en/ \
+    && rm /tmp/core-sounds.tar.gz
 
 COPY conf/pjsip.conf /etc/asterisk/pjsip.conf
 COPY conf/extensions.conf /etc/asterisk/extensions.conf
@@ -18,5 +27,3 @@ COPY conf/rtp.conf /etc/asterisk/rtp.conf
 COPY conf/logger.conf /etc/asterisk/logger.conf
 
 EXPOSE 5060/udp 8088 8089 10000-10099/udp
-
-CMD ["asterisk", "-f", "-vvv"]
