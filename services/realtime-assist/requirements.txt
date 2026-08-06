@@ -1,0 +1,4 @@
+aiohttp==3.11.11
+websockets==14.1
+groq==0.13.1
+psycopg2-binary==2.9.10
