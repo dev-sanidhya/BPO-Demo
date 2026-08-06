@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Agent Console — BPO AI Platform Pilot</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #0f1115; color: #e6e8eb; margin: 0; padding: 2rem; }
+  h1 { font-size: 1.1rem; color: #9aa5b1; font-weight: 600; }
+  .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; max-width: 900px; }
+  .card { background: #171a21; border: 1px solid #262b36; border-radius: 10px; padding: 1.25rem; }
+  .status { font-size: 0.85rem; color: #9aa5b1; margin-bottom: 0.75rem; }
+  .status.connected { color: #4ade80; }
+  .status.error { color: #f87171; }
+  input, button { font-size: 0.95rem; padding: 0.5rem 0.75rem; border-radius: 6px; border: 1px solid #262b36; }
+  input { background: #0f1115; color: #e6e8eb; width: 100%; box-sizing: border-box; margin-bottom: 0.5rem; }
+  button { background: #3b82f6; color: white; border: none; cursor: pointer; margin-right: 0.5rem; }
+  button:disabled { background: #262b36; cursor: not-allowed; }
+  button.hangup { background: #ef4444; }
+  #prompts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; max-height: 320px; overflow-y: auto; }
+  #prompts li { background: #1e2430; border-left: 3px solid #3b82f6; padding: 0.6rem 0.8rem; border-radius: 4px; font-size: 0.9rem; }
+  #prompts li .meta { color: #6b7280; font-size: 0.75rem; display: block; margin-top: 0.25rem; }
+</style>
+</head>
+<body>
+  <h1>BPO AI PLATFORM — PILOT AGENT CONSOLE</h1>
+  <div class="layout">
+    <div class="card">
+      <div id="sip-status" class="status">SIP: connecting…</div>
+      <input id="dial-target" placeholder="Extension to dial, e.g. 1002" value="1002" />
+      <button id="call-btn">Call</button>
+      <button id="hangup-btn" class="hangup" disabled>Hang up</button>
+      <audio id="remote-audio" autoplay></audio>
+    </div>
+    <div class="card">
+      <div id="ws-status" class="status">Live assist: connecting…</div>
+      <ul id="prompts"></ul>
+    </div>
+  </div>
+
+  <!--
+    JsSIP has not shipped a self-contained pre-bundled browser file since
+    ~v3.5 — every recent version expects consumers to run it through a
+    bundler (webpack/browserify). Rather than hand-rolling a partial vendor
+    bundle, this loads it as an ES module straight from jsDelivr's CDN
+    build, which resolves its own small transitive deps (debug,
+    sdp-transform) from the same CDN at runtime.
+
+    This means the agent's BROWSER needs outbound internet access to
+    jsdelivr.net on page load — a separate concern from the server-side
+    "self-hosted" requirement discussed with the client. If the pilot
+    environment has no internet access at all, download jssip's dist
+    yourself and run it through webpack, or swap in another WebRTC SIP
+    client. See README "Known tradeoffs".
+  -->
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
