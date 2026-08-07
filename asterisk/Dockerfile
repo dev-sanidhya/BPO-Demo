@@ -19,6 +19,12 @@ RUN mkdir -p /var/lib/asterisk/sounds/en \
     && tar xzf /tmp/core-sounds.tar.gz -C /var/lib/asterisk/sounds/en/ \
     && rm /tmp/core-sounds.tar.gz
 
+# Real customer-service call recording (public domain, archive.org) used by
+# scripts/make_real_call_test.py to prove transcription/QA-scoring/nudging
+# against genuine call content, not just Asterisk's own demo audio. See
+# test-audio/README for provenance.
+COPY test-audio/real-call-sample.wav /var/lib/asterisk/sounds/en/real-call-sample.wav
+
 COPY conf/pjsip.conf /etc/asterisk/pjsip.conf
 COPY conf/extensions.conf /etc/asterisk/extensions.conf
 COPY conf/ari.conf /etc/asterisk/ari.conf
