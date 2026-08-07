@@ -5,7 +5,21 @@
 // e.g. ?host=192.168.1.50
 const params = new URLSearchParams(window.location.search);
 const HOST = params.get("host") || window.location.hostname;
-const SIP_WS_URL = `wss://${HOST}:8089/ws`;
+// Plain ws, not wss: the Asterisk transport (asterisk/conf/pjsip.conf) is
+// deliberately protocol=ws for this pilot — no TLS cert configured. Browsers
+// only allow microphone access on secure origins OR localhost, so this
+// works for same-machine testing via http://localhost but needs a
+// TLS-terminating proxy in front for a second physical device on the LAN.
+//
+// Port is 8088, not 8089: confirmed live that Asterisk's actual SIP
+// WebSocket upgrade is served on the shared HTTP/ARI port (8088, from
+// http.conf) at the /ws path — a raw WebSocket handshake against 8089 (the
+// port pjsip.conf's transport-ws section binds) gets no response at all,
+// while 8088/ws completes the upgrade correctly (verified with curl,
+// Sec-WebSocket-Protocol: sip echoed back). The transport-ws declaration in
+// pjsip.conf is still what makes chan_pjsip accept WebSocket registrations
+// in the first place — clients just connect via 8088 to reach it.
+const SIP_WS_URL = `ws://${HOST}:8088/ws`;
 const SIP_EXTENSION = params.get("ext") || "1001";
 const SIP_PASSWORD = params.get("pass") || "changeme1001";
 const REALTIME_WS_URL = `ws://${HOST}:8765`;
