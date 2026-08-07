@@ -108,6 +108,30 @@ MicroSIP) as extension `1002` (see `scripts/setup_extensions.sh` output for
 credentials) and dial `1001` from the agent console at
 http://localhost:8080, or vice versa.
 
+## Testing with a real customer service call recording
+
+`make_test_call.py` above proves the pipeline works, but its audio
+(Asterisk's own `demo-congrats`/`demo-thanks`) is generic installer
+narration — nothing for a QA rubric or coaching nudge to meaningfully react
+to. `scripts/make_real_call_test.py` instead plays a genuine ~2-minute
+customer service call recording (public domain, from the Internet
+Archive — see `asterisk/test-audio/README.md` for provenance):
+
+```bash
+python scripts/make_real_call_test.py --hold-seconds 60
+```
+
+Confirmed live: this produced a real, messy, imperfect transcript of an
+actual frustrated-customer call, a content-aware QA score (correctly
+flagged, low compliance/tone scores with specific reasoning), and —
+critically — a coaching nudge on **every single chunk** (10/10), each one
+genuinely relevant to what was said in that chunk (e.g. "Apologize for the
+wait time and thank them for holding," "Speak clearly and at a normal
+pace, please," even "Confirm if the doll can indeed block numbers" in
+response to an odd customer tangent). This is the strongest evidence yet
+that the transcription → scoring → nudging chain reacts to actual content,
+not just to the presence of any audio.
+
 ## What each piece does
 
 | Component | Role |
@@ -257,6 +281,19 @@ theoretical):
     documented above. Any config change after first boot needs
     `--renew-anon-volumes` to actually take effect; this cost significant
     debugging time before being caught via a deliberate marker-string test.
+11. **agent-ui never answered incoming calls.** Confirmed live via a real
+    two-tab test: dialing from `1001` to `1003` rang for the full 30s and
+    Asterisk logged "Nobody picked up," then hung up — `newRTCSession`
+    fires for both call directions, but nothing was calling `session.answer()`
+    on the receiving end. Fixed with a simple auto-answer for incoming
+    sessions (no ring UI/reject option — this is a two-tab pilot test rig,
+    not a real agent desktop).
+12. A caching bug in the browser automation tool used for this session
+    (separate from the nginx fix above) meant a "fresh" tab could still
+    render `outerHTML` matching an old, pre-fix page even though `curl`
+    against the same URL returned current content — worked around with a
+    cache-busting query parameter during testing; irrelevant for real
+    browsers hitting the now-fixed no-cache nginx config.
 
 **Measured latency** (from the verified run above, Groq's US infrastructure,
 tested from this environment):
@@ -312,6 +349,34 @@ curl):
   — indistinguishable from "the SIP library never loaded" from the UI
   alone. Now wrapped in `try/catch` with the actual error surfaced to both
   the status line and the console.
+- **The actual "nothing happened" report from real testing** turned out to
+  be the missing auto-answer bug (#11 above): the call was really ringing
+  for 30s with nobody able to pick up, not silently failing. Fixed.
+
+## Real customer-service call recording — the strongest proof yet
+
+`scripts/make_real_call_test.py` (see "Testing with a real customer
+service call recording" above) played a genuine ~2-minute customer service
+call recording through the full pipeline. Results, unedited:
+
+- **Real, messy transcript** of an actual frustrated-customer call about a
+  blocked phone number, captured correctly across 5 chunks per channel leg
+  — including disfluencies, mid-sentence corrections, and a confusing
+  tangent about someone's "baby doll" blocking a phone number.
+- **Content-aware QA scores**: both call legs scored low (10/20 overall)
+  with specific, accurate reasoning ("agent failed to follow any
+  compliance steps," "tone was not professional and empathetic") — not
+  generic boilerplate.
+- **A coaching nudge on every single chunk (10/10)**, each one genuinely
+  relevant to that specific chunk's content: "Apologize for the wait time
+  and thank them for holding," "Speak clearly and at a normal pace,
+  please," and — reacting to the customer's odd tangent — "Confirm if the
+  doll can indeed block numbers."
+
+This is meaningfully stronger evidence than the earlier demo-audio test:
+it proves the transcription → scoring → nudging chain reacts intelligently
+to real, unscripted, imperfect speech — not just that audio flows through
+the pipeline.
 
 **Do this before the client demo**: open the two URLs from "Testing a real
 two-party browser call" above in an actual Chrome/Edge/Firefox window,
