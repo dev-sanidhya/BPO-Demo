@@ -211,29 +211,32 @@ above — it won't work with agent-ui.)
   that needs its own build: e.g. write the raw audio `realtime-assist`
   already captures per chunk to disk instead of discarding it after
   transcription.
-- **⚠️ Real WebRTC-to-WebRTC calls (1001↔1003) fail the realtime-assist tap
-  — open issue, not yet fixed.** Confirmed live: when the far end is a real
-  WebRTC/opus browser call (not the Local-channel `autotest`/`realcalltest`
-  paths, which don't negotiate opus), requesting `format=ulaw` for the
-  External Media channel causes Asterisk to log hundreds of "No translator
-  path: (starting codec is not valid)" errors per second and the call
-  fails outright ("Nobody picked up" / exits non-zero after ~9s). A
-  `format=slin` fix was attempted and reverted: it stopped the translator
-  errors but produced garbled, hallucinated transcripts under two
-  different sample-rate/byte-order guesses (8kHz and 16kHz), with no way
-  to verify which was actually correct without listening to the raw audio
-  directly — rather than ship a third unverified guess, this reverted to
-  `ulaw`, which is proven correct for the Local-channel test paths but
-  does **not** fix real WebRTC calls. **Practical impact**: the automated
-  test scripts (`make_test_call.py`, `make_real_call_test.py`) fully prove
-  the transcription/QA/nudge pipeline works correctly and are safe to use
-  for a demo. A live two-browser call with real human voices will connect
-  (SIP signaling and basic audio between the two browsers should still
-  work — that part doesn't depend on the tap) but will **not** get
-  real-time transcription/nudges, and the post-call QA score will likely
-  be empty/flagged as "no audio captured." Fixing this needs proper audio
-  debugging — capturing and inspecting the actual RTP payload bytes (or
-  listening to them) rather than guessing at format/rate combinations.
+- ~~Real WebRTC-to-WebRTC calls (1001↔1003) fail the realtime-assist
+  tap~~ **Fixed — root-caused properly, not guessed.** Real WebRTC/opus
+  browser calls (unlike the Local-channel `autotest`/`realcalltest` paths,
+  which don't negotiate opus) made Asterisk fail transcoding outright with
+  `format=ulaw` (hundreds of "No translator path" errors/sec, call
+  dies). Switching to `format=slin` (Asterisk's universal internal format)
+  stopped the transcoding failure, but getting the actual wire format
+  right took three verified steps rather than guesses:
+  1. RTP payload type on this stream is 10 — RFC 3551's static table says
+     that means L16/44100Hz/stereo. Tried it; a human listener described
+     the result as **"how rats make sound"** — fast, high-pitched
+     chattering, the textbook symptom of too-high a sample rate.
+  2. RFC 3551 also specifies L16 RTP payloads are big-endian, while WAV/
+     PCM is little-endian — a required byteswap.
+  3. Correct combination — confirmed by matching a live transcript
+     **word-for-word** against known real call-center audio content —
+     is **8kHz mono, byteswapped**. Payload type 10 here is apparently
+     just Asterisk's own internal marker, not a literal RFC 3551
+     application.
+  Also found and fixed a second real bug during this: `chunker.py` was
+  concatenating UDP packets in *arrival* order with no regard for RTP
+  sequence numbers — UDP doesn't guarantee order, and reordering would
+  scramble audio in a way indistinguishable from a wrong-format bug.
+  Packets are now buffered and sorted by sequence number before decoding.
+  `chunker.py` and `ari_listener.py` have the full verification story in
+  their own comments.
 - **Realtime-assist event handling is single-threaded/sequential** — one
   call's Stasis setup (snoop + external media + bridge) is fully handled
   before the next event is processed. Fine at 2-3 seat pilot volume; would
@@ -317,6 +320,15 @@ theoretical):
     against the same URL returned current content — worked around with a
     cache-busting query parameter during testing; irrelevant for real
     browsers hitting the now-fixed no-cache nginx config.
+13. **The real WebRTC codec/transcoding failure** — see "Known tradeoffs"
+    above for the full three-step verified fix (not guessed): `format=ulaw`
+    failed transcoding outright for real WebRTC/opus calls; `format=slin`
+    fixed the transcoding failure but needed the actual wire format
+    determined empirically (RTP payload type inspection, a human listener
+    confirming "rat sounds" ruled out a wrong sample-rate guess, then a
+    byteswap + 8kHz mono combination verified word-for-word against known
+    real call content). Also fixed a real RTP packet-reordering bug in
+    `chunker.py` found along the way.
 
 **Measured latency** (from the verified run above, Groq's US infrastructure,
 tested from this environment):
