@@ -53,13 +53,24 @@ function initSip() {
     return;
   }
 
-  const socket = new JsSIP.WebSocketInterface(SIP_WS_URL);
-  ua = new JsSIP.UA({
-    sockets: [socket],
-    uri: `sip:${SIP_EXTENSION}@${HOST}`,
-    password: SIP_PASSWORD,
-    register: true,
-  });
+  // Previously uncaught: if UA construction throws for any reason, `ua`
+  // silently stays null forever with no error shown anywhere — the page
+  // just sits on its initial "connecting…" text until the Call button's
+  // own fallback message overwrites it, which looks identical to "the SIP
+  // library never loaded" even though it's a completely different failure.
+  try {
+    const socket = new JsSIP.WebSocketInterface(SIP_WS_URL);
+    ua = new JsSIP.UA({
+      sockets: [socket],
+      uri: `sip:${SIP_EXTENSION}@${HOST}`,
+      password: SIP_PASSWORD,
+      register: true,
+    });
+  } catch (e) {
+    setSipStatus(`SIP init error: ${e.message}`, "error");
+    console.error("JsSIP.UA construction failed:", e);
+    return;
+  }
 
   ua.on("connected", () => setSipStatus("connected to Asterisk", "connected"));
   ua.on("disconnected", () => setSipStatus("disconnected, retrying…", "error"));
@@ -78,7 +89,12 @@ function initSip() {
     session.on("failed", resetCallUI);
   });
 
-  ua.start();
+  try {
+    ua.start();
+  } catch (e) {
+    setSipStatus(`SIP start error: ${e.message}`, "error");
+    console.error("ua.start() failed:", e);
+  }
 }
 
 let currentSession = null;
