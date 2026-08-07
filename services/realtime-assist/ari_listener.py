@@ -161,22 +161,17 @@ class AriListener:
                 "POST", f"/channels/{channel_id}/snoop",
                 spy="both", app=ARI_APP, snoopId=f"snoop-{call_id}",
             )
-            # format=ulaw is proven correct: verified live against a known
-            # real customer-service call recording, producing an accurate
-            # transcript. There IS a separate, still-open issue where real
-            # WebRTC/opus calls (1001<->1003, unlike the Local-channel
-            # autotest/realcalltest paths) hit hundreds of "No translator
-            # path" errors and fail outright — a format=slin experiment to
-            # fix that was tried and reverted (produced garbled/hallucinated
-            # transcripts under two different sample-rate/byte-order
-            # guesses, with no reliable way to verify correctness without
-            # actually listening to the audio). See README "Known
-            # tradeoffs" — this needs proper audio debugging, not another
-            # blind guess.
+            # format=slin, not ulaw: ulaw made Asterisk fail transcoding
+            # outright ("No translator path", hundreds/sec) whenever the far
+            # end was a real WebRTC/opus endpoint (1001<->1003) — slin is
+            # Asterisk's universal internal format, so a transcoding path
+            # always exists. See chunker.py for how the wire format
+            # (8kHz mono, byteswapped) was determined — verified against
+            # known real call content, not guessed.
             extmedia = await self._rest(
                 "POST", "/channels/externalMedia",
                 app=ARI_APP, external_host=f"{SELF_HOST}:{port}",
-                format="ulaw", transport="udp", channelId=f"extmedia-{call_id}",
+                format="slin", transport="udp", channelId=f"extmedia-{call_id}",
             )
             bridge = await self._rest("POST", "/bridges", type="mixing", bridgeId=f"bridge-{call_id}")
             await self._rest(
