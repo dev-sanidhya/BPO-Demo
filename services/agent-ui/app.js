@@ -87,7 +87,16 @@ function initSip() {
     });
 
     session.on("ended", resetCallUI);
-    session.on("failed", resetCallUI);
+    // Previously this called resetCallUI() directly on failure too, which
+    // silently reset the status back to "registered as X" — indistinguishable
+    // from a call that never happened at all. Showing the actual cause here
+    // is what would have told us mic permission was the problem last time,
+    // instead of just "nothing happened."
+    session.on("failed", (e) => {
+      console.error("session failed:", e.cause, e);
+      resetCallUI();
+      setSipStatus(`call failed: ${e.cause}`, "error");
+    });
 
     // Confirmed live: without this, an incoming call just rings until
     // Asterisk's 30s timeout ("Nobody picked up") — newRTCSession fires for
@@ -97,7 +106,12 @@ function initSip() {
     // desktop — good enough to prove the call/audio/tap pipeline works.
     if (session.direction === "incoming") {
       setSipStatus("incoming call, answering…", "connected");
-      session.answer({ mediaConstraints: { audio: true, video: false } });
+      try {
+        session.answer({ mediaConstraints: { audio: true, video: false } });
+      } catch (e) {
+        console.error("session.answer() threw:", e);
+        setSipStatus(`answer error: ${e.message}`, "error");
+      }
     } else {
       setSipStatus("calling…", "connected");
     }
