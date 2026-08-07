@@ -115,9 +115,29 @@ http://localhost:8080, or vice versa.
 | `asterisk/` | Telephony core: PJSIP extensions, ARI, dialplan (on `andrius/asterisk:20`, with core sound files added for `Playback()`) |
 | `services/qa-scoring/` | Post-call worker: reads the transcript chunks already captured for a finished call and scores them against the rubric in `rubric.py` |
 | `services/realtime-assist/` | Taps every live call's audio via ARI Snoop + External Media, chunks it (~12s), transcribes + nudges via Groq, pushes nudges over a websocket, and is the single source of transcript data |
-| `services/agent-ui/` | Browser-based WebRTC softphone (extension 1001) + live assist panel |
+| `services/agent-ui/` | Browser-based WebRTC softphone (open with `?ext=1001` or `?ext=1003`) + live assist panel |
 | `dashboard/metabase_provision/` | Auto-creates the Postgres connection, four starter questions, and a dashboard in Metabase on first boot |
 | `db/init.sql` | Schema: `calls`, `transcripts`, `qa_scores`, `realtime_prompts` |
+
+## Testing a real two-party browser call
+
+Extensions `1001` and `1003` are both WebRTC-capable specifically so a real
+two-party call can be tested entirely in the browser, with two actual
+people talking — no desktop softphone needed:
+
+1. Open **http://localhost:8080/?ext=1001&pass=changeme1001** in one tab
+   (or device).
+2. Open **http://localhost:8080/?ext=1003&pass=changeme1003** in another
+   tab (or device, if using a TLS proxy — see tradeoffs below).
+3. Wait for both to show "SIP: registered as ...".
+4. In the 1001 tab, type `1003` in the dial box and click Call. Accept the
+   microphone permission prompt in both tabs.
+5. Talk. Both sides should hear each other, and the call is being tapped
+   in real time by `realtime-assist` and QA-scored after hangup, same as
+   any other call — check the Metabase dashboard afterward.
+
+(`1002` stays plain-UDP for desktop softphone testing per the section
+above — it won't work with agent-ui.)
 
 ## Known tradeoffs (raise these with the client before scaling past the pilot)
 
@@ -137,7 +157,24 @@ http://localhost:8080, or vice versa.
 - **WebRTC over plain WS, not WSS-with-real-TLS** by default — browsers
   require HTTPS/secure-context for `getUserMedia` outside `localhost`. Put
   a TLS-terminating reverse proxy (nginx/Caddy) in front for anything
-  beyond local testing.
+  beyond local testing (a second physical device on the LAN, for example).
+  Confirmed live: the actual SIP WebSocket upgrade is served on port 8088
+  (Asterisk's shared HTTP/ARI server, `/ws` path) — a raw handshake
+  against port 8089 (where `pjsip.conf`'s `transport-ws` section binds)
+  gets no response at all. `pjsip.conf` still needs that transport section
+  to make `chan_pjsip` accept WebSocket registrations at all; clients just
+  connect via 8088 to reach it. `services/agent-ui/app.js` is wired to
+  8088 accordingly.
+- **Docker anonymous volumes silently shadow config rebuilds** — the
+  `andrius/asterisk` base image declares `VOLUME`s including
+  `/etc/asterisk`. Confirmed live: after the first `docker compose up`,
+  subsequent `docker compose build` + `up` cycles kept serving the
+  *original* config from that anonymous volume even though the image
+  itself had the new files — normal `--force-recreate` doesn't reseed
+  anonymous volumes from a rebuilt image. Any time you edit files under
+  `asterisk/conf/` after the first boot, redeploy with
+  `docker compose up -d --force-recreate --renew-anon-volumes asterisk`,
+  not a plain rebuild+restart, or the change silently won't take effect.
 - **No full-call audio archive** — since `MixMonitor` was removed (see
   Architecture above), there's no standalone recording file for a human to
   listen back to. QA scoring works from text transcripts only. If the
@@ -201,6 +238,20 @@ theoretical):
 7. `MixMonitor` produced empty recordings when run alongside the Snoop tap
    — removed it and unified QA scoring on the already-working real-time
    transcript pipeline (see Architecture above).
+8. Extension `1002` (originally the only "customer" endpoint) was plain-UDP
+   only, making browser-to-browser testing impossible — added WebRTC
+   extension `1003` so a real two-party call can be tested entirely in two
+   browser tabs. See "Testing a real two-party browser call" above.
+9. agent-ui's SIP WebSocket URL pointed at port 8089 — confirmed live (raw
+   WebSocket handshake via `curl` and via browser `WebSocket()`) that 8089
+   accepts no HTTP upgrade at all, while port 8088 completes the SIP
+   WebSocket handshake correctly. Fixed in `app.js`. See the "WebRTC over
+   plain WS" tradeoff above for why 8089 exists at all.
+10. Rebuilding the Asterisk image after the first `docker compose up`
+    silently had no effect — root-caused to the anonymous-volume issue
+    documented above. Any config change after first boot needs
+    `--renew-anon-volumes` to actually take effect; this cost significant
+    debugging time before being caught via a deliberate marker-string test.
 
 **Measured latency** (from the verified run above, Groq's US infrastructure,
 tested from this environment):
@@ -218,10 +269,20 @@ tested from this environment):
   silence on `realtime_prompts` was the LLM correctly deciding "no nudge
   needed" for a generic message, not a broken path.
 
-**Not yet exercised live**: a real two-party PJSIP call (1001 ↔ 1002) via
-an actual softphone. Worth doing before the client demo — the automated
-test call proves the audio/AI pipeline, but not the WebRTC agent-ui dialer
-flow a real agent would use.
+**Real two-party browser call — partially verified.** The SIP transport
+itself is confirmed live and correct: both `1001` and `1003` register as
+`ws` endpoints (`pjsip show endpoints`), and a raw `WebSocket()` connection
+from inside a real browser tab to `ws://localhost:8088/ws` completes the
+SIP-protocol handshake successfully. What's *not* verified is a full call
+with actual two-way audio — the sandboxed browser tool used for this
+session blocks the CDN fetch agent-ui needs to load the JsSIP library
+(`https://cdn.jsdelivr.net/...`) even though the same URL is reachable via
+plain `curl` — that's a restriction specific to this tool's browser
+automation, not a bug in the app. **This needs to be tested in a real
+browser** (open the two URLs in the "Testing a real two-party browser
+call" section above in actual Chrome/Edge/Firefox tabs) before the client
+demo — the transport is proven, but the full JsSIP-mediated call/audio
+path is not.
 
 ## Editing the QA rubric
 
