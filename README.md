@@ -146,14 +146,19 @@ above — it won't work with agent-ui.)
   self-hosted open-weight LLM/ASR instead — real GPU hardware requirement,
   noticeably weaker scoring quality. Not implemented here; flagged as a
   decision point.
-- **agent-ui's SIP library loads from a CDN at runtime** (JsSIP hasn't
-  shipped a self-contained browser bundle since ~v3.5 — every recent
-  version expects a bundler). If the agent's browser has no internet
-  access, the dialer panel will fail to load — but is isolated so the QA/
-  live-assist side of the platform still works regardless (confirmed live
-  in-browser: SIP panel shows a clear error, live-assist panel keeps
-  reconnecting independently). Vendor a webpack-bundled JsSIP build if full
-  offline browser operation is required.
+- ~~agent-ui's SIP library loads from a CDN at runtime~~ **Fixed.**
+  Originally loaded JsSIP from jsDelivr at runtime (it hasn't shipped a
+  self-contained browser bundle since ~v3.5). Confirmed live that this
+  broke in a real browser (not just this sandbox) — likely an ad blocker
+  or network policy blocking the fetch even though the URL was reachable
+  via plain `curl`. Fixed by bundling JsSIP into a single local file at
+  Docker build time (`services/agent-ui/package.json` + a Node build stage
+  in its `Dockerfile`) — agent-ui now has zero runtime dependency on any
+  CDN. Verified live: `typeof JsSIP` is defined from the local bundle, and
+  independently of that, both `1001` and `1003` were confirmed to actually
+  **register** with Asterisk from a real browser tab (`pjsip show
+  endpoints` showing live contacts, not just a client-side "connected"
+  claim).
 - **WebRTC over plain WS, not WSS-with-real-TLS** by default — browsers
   require HTTPS/secure-context for `getUserMedia` outside `localhost`. Put
   a TLS-terminating reverse proxy (nginx/Caddy) in front for anything
@@ -269,20 +274,33 @@ tested from this environment):
   silence on `realtime_prompts` was the LLM correctly deciding "no nudge
   needed" for a generic message, not a broken path.
 
-**Real two-party browser call — partially verified.** The SIP transport
-itself is confirmed live and correct: both `1001` and `1003` register as
-`ws` endpoints (`pjsip show endpoints`), and a raw `WebSocket()` connection
-from inside a real browser tab to `ws://localhost:8088/ws` completes the
-SIP-protocol handshake successfully. What's *not* verified is a full call
-with actual two-way audio — the sandboxed browser tool used for this
-session blocks the CDN fetch agent-ui needs to load the JsSIP library
-(`https://cdn.jsdelivr.net/...`) even though the same URL is reachable via
-plain `curl` — that's a restriction specific to this tool's browser
-automation, not a bug in the app. **This needs to be tested in a real
-browser** (open the two URLs in the "Testing a real two-party browser
-call" section above in actual Chrome/Edge/Firefox tabs) before the client
-demo — the transport is proven, but the full JsSIP-mediated call/audio
-path is not.
+**Real two-party browser call — SIP signaling fully verified live; audio
+not yet verified.** Confirmed directly in a real browser tab (not just via
+curl):
+
+- `1001` and `1003` both **actually register** with Asterisk from agent-ui
+  — `pjsip show endpoints` shows live contacts (`1001/sip:...@172.21.0.1:...`,
+  `NonQual` status), not just a client-side "connected" claim.
+- This required fixing a real PJSIP config bug along the way: the AOR
+  sections were named `1001-aor` etc., but `res_pjsip_registrar` resolves
+  an incoming REGISTER's AOR by the exact user-part of its Request-URI
+  (`1001`, not `1001-aor`) — renamed the AOR sections to share the
+  endpoint's exact name (`[1001]` appearing twice, once as `type=endpoint`
+  once as `type=aor` — a safe, common PJSIP convention since sorcery keys
+  objects by `(type, name)`, not name alone).
+- Clicking Call did trigger a `getUserMedia()` request — but the browser
+  automation tool used for this session explicitly blocks microphone
+  access ("device capture... blocked in the Browser pane"), so the actual
+  INVITE/audio negotiation was never reached. No channel appeared in
+  `core show channels` as a result. This is a tool limitation, not an app
+  bug — the same call flow, run from a real browser with real mic
+  permissions, has nothing left in its way based on everything checked
+  above.
+
+**Do this before the client demo**: open the two URLs from "Testing a real
+two-party browser call" above in an actual Chrome/Edge/Firefox window,
+grant microphone access, and confirm two-way audio — that's the one link
+in the chain not yet exercised end-to-end.
 
 ## Editing the QA rubric
 

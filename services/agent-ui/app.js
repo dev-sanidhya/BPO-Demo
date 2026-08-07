@@ -23,7 +23,6 @@ const SIP_WS_URL = `ws://${HOST}:8088/ws`;
 const SIP_EXTENSION = params.get("ext") || "1001";
 const SIP_PASSWORD = params.get("pass") || "changeme1001";
 const REALTIME_WS_URL = `ws://${HOST}:8765`;
-const JSSIP_CDN_URL = "https://cdn.jsdelivr.net/npm/jssip@3.13.8/+esm";
 
 // --- Elements -----------------------------------------------------------
 const sipStatusEl = document.getElementById("sip-status");
@@ -35,14 +34,11 @@ const remoteAudioEl = document.getElementById("remote-audio");
 const promptsEl = document.getElementById("prompts");
 
 // --- SIP (JsSIP) ----------------------------------------------------------
-// Loaded as a dynamic import, deliberately isolated from the rest of this
-// page: JsSIP hasn't shipped a self-contained browser bundle since ~v3.5,
-// so this fetches it (and its own small transitive deps) from jsDelivr at
-// runtime. If that fetch fails — no internet from the agent's browser, CDN
-// blocked by a firewall, etc. — only the SIP/dialer panel should degrade;
-// the unrelated live-assist websocket panel must keep working regardless.
-// A static top-level `import` would fail this whole module together, which
-// is exactly the coupling this avoids.
+// JsSIP is loaded via a plain <script> tag (vendor/jssip.bundle.js, bundled
+// at Docker build time — see index.html + package.json) rather than a
+// dynamic CDN import. Still guarded with a runtime check: if the bundle
+// somehow failed to load, the SIP/dialer panel should degrade gracefully
+// rather than take down the unrelated live-assist websocket panel below.
 let ua = null;
 
 function setSipStatus(text, cls) {
@@ -50,13 +46,10 @@ function setSipStatus(text, cls) {
   sipStatusEl.className = `status ${cls || ""}`;
 }
 
-async function initSip() {
-  let JsSIP;
-  try {
-    JsSIP = await import(JSSIP_CDN_URL);
-  } catch (e) {
-    setSipStatus("failed to load SIP library (dialer unavailable)", "error");
-    console.error("JsSIP CDN import failed:", e);
+function initSip() {
+  if (typeof JsSIP === "undefined") {
+    setSipStatus("SIP library failed to load (dialer unavailable)", "error");
+    console.error("window.JsSIP is undefined — vendor/jssip.bundle.js did not load");
     return;
   }
 

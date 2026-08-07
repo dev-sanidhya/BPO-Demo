@@ -26,7 +26,7 @@
   <div class="layout">
     <div class="card">
       <div id="sip-status" class="status">SIP: connecting…</div>
-      <input id="dial-target" placeholder="Extension to dial, e.g. 1002" value="1002" />
+      <input id="dial-target" placeholder="Extension to dial, e.g. 1003" value="1003" />
       <button id="call-btn">Call</button>
       <button id="hangup-btn" class="hangup" disabled>Hang up</button>
       <audio id="remote-audio" autoplay></audio>
@@ -38,20 +38,14 @@
   </div>
 
   <!--
-    JsSIP has not shipped a self-contained pre-bundled browser file since
-    ~v3.5 — every recent version expects consumers to run it through a
-    bundler (webpack/browserify). Rather than hand-rolling a partial vendor
-    bundle, this loads it as an ES module straight from jsDelivr's CDN
-    build, which resolves its own small transitive deps (debug,
-    sdp-transform) from the same CDN at runtime.
-
-    This means the agent's BROWSER needs outbound internet access to
-    jsdelivr.net on page load — a separate concern from the server-side
-    "self-hosted" requirement discussed with the client. If the pilot
-    environment has no internet access at all, download jssip's dist
-    yourself and run it through webpack, or swap in another WebRTC SIP
-    client. See README "Known tradeoffs".
+    JsSIP is bundled at Docker build time (see Dockerfile + package.json)
+    into vendor/jssip.bundle.js, a single self-contained file with no
+    external requests. This used to load JsSIP from a CDN at runtime
+    instead — confirmed live that this broke in a real browser (ad
+    blocker/network policy blocked the fetch even though the URL itself
+    was reachable via curl), so agent-ui no longer depends on any CDN.
   -->
+  <script src="./vendor/jssip.bundle.js"></script>
   <script type="module" src="./app.js"></script>
 </body>
 </html>

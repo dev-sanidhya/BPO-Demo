@@ -1,0 +1,13 @@
+{
+  "name": "agent-ui",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bundles JsSIP into a single self-contained file at build time so agent-ui never depends on a CDN at runtime.",
+  "scripts": {
+    "build": "esbuild --bundle --format=iife --global-name=JsSIP --platform=browser --outfile=vendor/jssip.bundle.js node_modules/jssip/lib/JsSIP.js"
+  },
+  "dependencies": {
+    "jssip": "3.13.8",
+    "esbuild": "0.28.1"
+  }
+}

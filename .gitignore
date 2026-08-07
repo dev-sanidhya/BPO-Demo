@@ -3,3 +3,4 @@ __pycache__/
 .env
 *.wav
 node_modules/
+services/agent-ui/vendor/
