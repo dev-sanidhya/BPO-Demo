@@ -161,6 +161,18 @@ class AriListener:
                 "POST", f"/channels/{channel_id}/snoop",
                 spy="both", app=ARI_APP, snoopId=f"snoop-{call_id}",
             )
+            # format=ulaw is proven correct: verified live against a known
+            # real customer-service call recording, producing an accurate
+            # transcript. There IS a separate, still-open issue where real
+            # WebRTC/opus calls (1001<->1003, unlike the Local-channel
+            # autotest/realcalltest paths) hit hundreds of "No translator
+            # path" errors and fail outright — a format=slin experiment to
+            # fix that was tried and reverted (produced garbled/hallucinated
+            # transcripts under two different sample-rate/byte-order
+            # guesses, with no reliable way to verify correctness without
+            # actually listening to the audio). See README "Known
+            # tradeoffs" — this needs proper audio debugging, not another
+            # blind guess.
             extmedia = await self._rest(
                 "POST", "/channels/externalMedia",
                 app=ARI_APP, external_host=f"{SELF_HOST}:{port}",

@@ -9,6 +9,16 @@ external_host only gives us a destination address, not per-packet call
 identity, so port-per-call is the simplest correct way to demux multiple
 concurrent calls.
 
+format=ulaw is proven correct: verified live against a known-content real
+customer service call recording, producing an accurate transcript matching
+the actual audio. A format=slin experiment (attempting to fix a separate
+codec-transcoding failure specific to real WebRTC/opus calls — see
+ari_listener.py) was tried and reverted: it produced garbled, hallucinated
+transcripts under two different sample-rate/byte-order guesses, and rather
+than ship a third unverified guess, this reverts to the format proven to
+work correctly. The WebRTC-specific transcoding issue remains open — see
+README "Known tradeoffs".
+
 This module owns: binding that per-call UDP socket, stripping the (minimal,
 no-extension) 12-byte RTP header, decoding u-law -> 16-bit PCM, and firing a
 callback with a WAV blob once ~CHUNK_SECONDS of audio has accumulated.
