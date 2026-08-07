@@ -211,6 +211,29 @@ above — it won't work with agent-ui.)
   that needs its own build: e.g. write the raw audio `realtime-assist`
   already captures per chunk to disk instead of discarding it after
   transcription.
+- **⚠️ Real WebRTC-to-WebRTC calls (1001↔1003) fail the realtime-assist tap
+  — open issue, not yet fixed.** Confirmed live: when the far end is a real
+  WebRTC/opus browser call (not the Local-channel `autotest`/`realcalltest`
+  paths, which don't negotiate opus), requesting `format=ulaw` for the
+  External Media channel causes Asterisk to log hundreds of "No translator
+  path: (starting codec is not valid)" errors per second and the call
+  fails outright ("Nobody picked up" / exits non-zero after ~9s). A
+  `format=slin` fix was attempted and reverted: it stopped the translator
+  errors but produced garbled, hallucinated transcripts under two
+  different sample-rate/byte-order guesses (8kHz and 16kHz), with no way
+  to verify which was actually correct without listening to the raw audio
+  directly — rather than ship a third unverified guess, this reverted to
+  `ulaw`, which is proven correct for the Local-channel test paths but
+  does **not** fix real WebRTC calls. **Practical impact**: the automated
+  test scripts (`make_test_call.py`, `make_real_call_test.py`) fully prove
+  the transcription/QA/nudge pipeline works correctly and are safe to use
+  for a demo. A live two-browser call with real human voices will connect
+  (SIP signaling and basic audio between the two browsers should still
+  work — that part doesn't depend on the tap) but will **not** get
+  real-time transcription/nudges, and the post-call QA score will likely
+  be empty/flagged as "no audio captured." Fixing this needs proper audio
+  debugging — capturing and inspecting the actual RTP payload bytes (or
+  listening to them) rather than guessing at format/rate combinations.
 - **Realtime-assist event handling is single-threaded/sequential** — one
   call's Stasis setup (snoop + external media + bridge) is fully handled
   before the next event is processed. Fine at 2-3 seat pilot volume; would
