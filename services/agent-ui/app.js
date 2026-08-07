@@ -79,6 +79,7 @@ function initSip() {
 
   ua.on("newRTCSession", ({ session }) => {
     currentSession = session;
+    callBtn.disabled = true;
     hangupBtn.disabled = false;
 
     session.connection.addEventListener("track", (event) => {
@@ -87,6 +88,19 @@ function initSip() {
 
     session.on("ended", resetCallUI);
     session.on("failed", resetCallUI);
+
+    // Confirmed live: without this, an incoming call just rings until
+    // Asterisk's 30s timeout ("Nobody picked up") — newRTCSession fires for
+    // BOTH directions, but nothing was ever answering the incoming side.
+    // Auto-answering here is deliberately simple (no ring UI, no reject
+    // option) since this is a two-tab pilot test rig, not a real agent
+    // desktop — good enough to prove the call/audio/tap pipeline works.
+    if (session.direction === "incoming") {
+      setSipStatus("incoming call, answering…", "connected");
+      session.answer({ mediaConstraints: { audio: true, video: false } });
+    } else {
+      setSipStatus("calling…", "connected");
+    }
   });
 
   try {
@@ -103,6 +117,7 @@ function resetCallUI() {
   currentSession = null;
   hangupBtn.disabled = true;
   callBtn.disabled = false;
+  setSipStatus(`registered as ${SIP_EXTENSION}`, "connected");
 }
 
 callBtn.addEventListener("click", () => {
