@@ -296,6 +296,22 @@ curl):
   bug — the same call flow, run from a real browser with real mic
   permissions, has nothing left in its way based on everything checked
   above.
+- **A real caching bug surfaced while chasing this down**: nginx
+  (`services/agent-ui`) sent no explicit cache headers, so a browser could
+  silently keep serving an old cached `index.html`/`app.js`/bundle after a
+  rebuild — confirmed directly (a fresh browser tab rendered a page whose
+  `outerHTML` still had the *old*, pre-fix comment text, even though
+  `curl` against the same URL returned the new content). Fixed with
+  `services/agent-ui/nginx.conf` sending `Cache-Control: no-store` on
+  every response. **If you tested before this fix and saw a stale error,
+  do a hard refresh (Ctrl+Shift+R), not just a normal reload**, to be sure
+  your browser drops what it already cached in memory.
+- Also hardened `initSip()` in `app.js`: it previously had no error
+  handling around `JsSIP.UA` construction, so a thrown exception there
+  would leave `ua` silently `null` forever with zero error shown anywhere
+  — indistinguishable from "the SIP library never loaded" from the UI
+  alone. Now wrapped in `try/catch` with the actual error surfaced to both
+  the status line and the console.
 
 **Do this before the client demo**: open the two URLs from "Testing a real
 two-party browser call" above in an actual Chrome/Edge/Firefox window,
