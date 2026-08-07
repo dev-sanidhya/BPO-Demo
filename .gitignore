@@ -2,5 +2,6 @@ __pycache__/
 *.pyc
 .env
 *.wav
+!asterisk/test-audio/*.wav
 node_modules/
 services/agent-ui/vendor/
