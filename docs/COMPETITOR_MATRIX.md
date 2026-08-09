@@ -14,6 +14,20 @@ Research date: 2026-08-09. Sources are official vendor product pages or document
 | Ameyo | On-prem/cloud/hybrid deployment; voice, email, webchat, SMS, mobile, social, WhatsApp; unified journey context; routing; and channel/agent/live reports. | This is the closest deployment and India-market table-stakes reference. On-prem alone is not differentiation. |
 | Exotel | Realtime assist, knowledge, next-best actions, compliance guidance, after-call automation, omnichannel readiness, security, and masking. | Indian buyers can already buy cloud telephony plus assist; our privacy and ownership claims must be concrete. |
 
+## Implemented Parity and Deliberate Gaps
+
+| Market capability | Aperture CX status |
+|---|---|
+| Voice agent desktop and call controls | Implemented and proven over local Asterisk WebRTC; PSTN carrier onboarding remains external. |
+| Live transcript, contextual knowledge, prompts, and checklists | Implemented with 15-second near-realtime Groq chunks plus strict-local deterministic fallback. |
+| Automated summary and QA | Implemented with strict-schema output, timestamp evidence, immutable automatic score, review override, and durable retry. |
+| Conversation analytics and exports | Implemented for voice and web chat with campaign/queue/agent filters, CSV/PDF, actual CSAT, predicted risk, and cost ledger. |
+| Multilingual | English, Hindi, Marathi, and Hinglish lanes exist; Marathi is review-required based on measured ASR error. |
+| Full CCaaS routing, WFM, predictive dialer, native WhatsApp/social, screen recording | Not implemented. Mature suites remain materially broader here. |
+| Enterprise scale/HA/compliance certification | Not verified. No 700-seat claim. |
+
+The differentiation is fit, not universal superiority: a buyer can inspect and own one deployable codebase spanning the desktop, telephony extension point, live assistance, evidence-linked QA, reporting, strict-local fallback, and transparent cost. Mature vendors offer much deeper carrier, workforce, channel, compliance, and scale operations.
+
 ## Credible Differentiation
 
 This product should not claim broader feature superiority over mature enterprise suites. It should be better suited to the target buyer on these dimensions:
@@ -42,13 +56,14 @@ This product should not claim broader feature superiority over mature enterprise
 - Genesys quality assurance and monitoring: https://www.genesys.com/capabilities/quality-assurance-and-monitoring
 - Genesys speech and text analytics: https://www.genesys.com/capabilities/speech-and-text-analytics
 - Genesys reporting and analytics: https://www.genesys.com/capabilities/reporting-analytics
+- Genesys workforce engagement management: https://www.genesys.com/en-gb/capabilities/wem-workforce-engagement-management
 - Five9 pricing and bundle capabilities: https://www.five9.com/products/pricing
 - Five9 platform capabilities: https://www.five9.com/products-solutions
-- Observe.AI interaction intelligence: https://www.observe.ai/platform/intelligence-and-data/interaction-intelligence
+- Five9 agent assist: https://www.five9.com/en-ca/products/capabilities/agent-assist
+- Observe.AI interaction intelligence: https://www.observe.ai/platform/interaction-intelligence
 - Observe.AI realtime agent assist: https://www.observe.ai/real-time/agent-assist
 - Cresta quality management: https://cresta.com/cresta-qm
 - Cresta agent operations center: https://cresta.com/agent-operations-center
 - Ameyo omnichannel/on-prem offering: https://www.ameyo.com/product/omni/
 - Ameyo omnichannel features: https://www.ameyo.com/product/omni/features
 - Exotel agent assist: https://exotel.com/products/agent-assist/
-

@@ -85,11 +85,11 @@ Deferred items must have explicit extension points, but no placeholder UI may im
 
 ## Current Acceptance Status
 
-The 1-3 seat deterministic pilot path passes all twelve acceptance areas through automated API, Chrome, Electron, packaged-executable, Docker, privacy, and export checks. Where external authority would be required, the accepted evidence-backed substitute is explicit:
+The 1-3 seat pilot path passes all twelve acceptance areas through automated API, Chrome, Electron, packaged-executable, Docker, privacy, export, real Groq, and carrier-free WebRTC/SIP checks. Where external authority would be required, the accepted evidence-backed substitute is explicit:
 
-- Voice uses the deterministic local test trunk and synchronized English two-speaker fixture, not a live carrier.
+- Voice has both deterministic fixtures and a real two-party Asterisk/WebRTC media path, but no live PSTN carrier.
 - The second isolated agent is verified at the authorization/realtime layer; a 700-seat load claim is intentionally deferred.
-- English, Hindi, Marathi, and code switching are exercised in the digital workflow; only English is claimed for synchronized voice evidence.
+- English, Hindi, Marathi, and code switching have synchronized voice fixtures and external-ASR measurements. Marathi remains human-review-required based on the measured error rate.
 - Human-review cost has a distinct ledger category in the model, while the deterministic fixture currently generates telephony, transcription, inference, and storage events automatically.
 
 See `docs/VERIFICATION.md` for exact commands, results, evidence files, and remaining boundaries.

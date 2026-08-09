@@ -18,10 +18,11 @@ The recommended product shape is implemented: agents use an installable Electron
 - Configurable campaign, queue, script, knowledge article, QA form, privacy mode, and role-based user provisioning.
 - Automatic QA with timestamped evidence, immutable original score, and reasoned human override.
 - Reports filtered by campaign, queue, channel, and agent, with campaign-scoped client access and matching CSV/PDF exports.
-- Strict-local default processing with an automated no-network voice finalization test. Optional legacy external-AI services remain behind a Compose profile.
+- Strict-local default processing with an automated no-network voice finalization test, plus an admin-selectable Groq lane for real transcription, guidance, retrieval, summaries, evidence-linked QA, risk prediction, and measured per-call AI cost.
+- A carrier-free two-party WebRTC path: the Electron agent registers as SIP 1001, a browser customer registers as 1003, and Asterisk routes extension 2003 with real audio and call controls.
 - Health, privacy/provider status, queue lag, recording storage, realtime event isolation, and audit events.
 
-The deterministic voice lane is deliberately limited to a synchronized English two-speaker fixture. Digital workflows support English, Hindi, Marathi, and code switching. A production carrier trunk, 700-seat capacity/HA certification, predictive dialing, workforce management, native WhatsApp onboarding, and screen recording are post-pilot work, not current claims.
+The deterministic lane includes synchronized English, Hindi, Marathi, and Hinglish fixtures. The external lane has been exercised against English and CC-BY FLEURS Hindi/Marathi speech plus synthetic support calls. Hindi and Hinglish are demo-ready; the measured Marathi sample accuracy is not strong enough for autonomous scoring, so Marathi is visibly review-required. A production carrier trunk, 700-seat capacity/HA certification, predictive dialing, workforce management, native WhatsApp onboarding, and screen recording are post-pilot work, not current claims.
 
 ## Architecture
 
@@ -31,10 +32,10 @@ Web operations portal ──┼── FastAPI platform API ── PostgreSQL
 Customer web chat ──────┘           │
                                     ├── recording/transcript/QA evidence
                                     ├── realtime authorized events
-                                    └── local voice test lane / Asterisk extension point
+                                    └── local fixtures / Groq AI / Asterisk WebRTC
 ```
 
-The default Compose stack is local-first: `postgres`, `platform-api`, durable `platform-worker`, `console`, and `asterisk`. Voice evidence is recorded as a durable job before processing; a worker retries abandoned or transiently failed jobs. The previous Groq workers, browser SIP test harness, and Metabase surface are preserved under explicit profiles but are not required by Aperture CX.
+The default Compose stack is local-first: `postgres`, `platform-api`, durable `platform-worker`, `console`, and `asterisk`. Voice evidence is recorded as a durable job before processing; a worker retries abandoned or transiently failed jobs. Groq is an optional provider inside that same durable pipeline, not a second product path. The lightweight browser SIP endpoint and Metabase remain optional profiles.
 
 ## Quick start
 
@@ -77,6 +78,23 @@ npm run electron:dist:win
 
 The installer is written to `apps/console/release/Aperture CX Agent Setup 0.1.0.exe`. The desktop expects the API at `http://localhost:18080` by default; set `PLATFORM_API_URL` before launch when the on-prem server uses another address.
 
+### Real Groq AI mode
+
+Set `GROQ_API_KEY` in a local untracked environment file, start Compose with it, sign in as admin, then switch the privacy mode to `external`. The selected defaults are `whisper-large-v3` for realtime/final ASR and `openai/gpt-oss-20b` for guidance and QA. External mode sends call audio/transcript context to Groq; the UI and diagnostics say so explicitly. Never use it where the client's consent or data policy requires strict-local processing.
+
+### Carrier-free live call
+
+```powershell
+$env:AGENT_UI_PORT='18082'
+docker compose --profile legacy-ui up -d --build agent-ui
+
+Set-Location apps\console
+$env:PLATFORM_SIP_ENABLED='true'
+npm run electron:dev
+```
+
+Open `http://localhost:18082/?ext=1003&pass=changeme1003&assist=0`, allow microphone access, then dial `2003` from Electron. This is real same-machine WebRTC/SIP media through Asterisk, not PSTN. Replace the demo SIP passwords before any shared network use. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for carrier onboarding.
+
 ## Reproducible verification
 
 ```powershell
@@ -89,6 +107,7 @@ Set-Location apps\console
 npm run build
 npm run test:e2e:web
 npm run test:e2e:electron
+npm run test:e2e:sip
 npm run electron:dist:win
 npm run test:e2e:packaged
 ```
@@ -106,13 +125,13 @@ Genesys, NICE, Five9, Observe.AI, Cresta, Ameyo, and Exotel establish the table 
 - `apps/console/`: React operations portal, customer widget, Electron shell, and UI E2E tests.
 - `services/platform-api/`: tenant-aware FastAPI application, durable worker, data model, authorization, local voice evidence, reporting, and API tests.
 - `asterisk/`: Asterisk 20 configuration and telephony extension point.
-- `asterisk/test-audio/deterministic-pilot.*`: synchronized two-speaker voice acceptance fixture and timing manifest.
+- `asterisk/test-audio/`: licensed real-call provenance plus reproducible synchronized English/Hindi/Marathi/Hinglish fixtures and manifests.
 - `docs/PRODUCT_CONTRACT.md`: scope, invariants, deferred work, and acceptance scenario.
 - `docs/COMPETITOR_MATRIX.md`: primary-source market comparison and claim boundaries.
 - `docs/QA_INVENTORY.md`: baseline audit and reusable defect inventory.
 - `docs/VERIFICATION.md`: commands, results, and remaining limits.
 
-## Optional legacy profiles
+## Optional auxiliary profiles
 
 These are retained for reference and are not part of the default verified platform path:
 
@@ -122,4 +141,4 @@ docker compose --profile legacy-ui up -d
 docker compose --profile legacy-dashboard up -d
 ```
 
-`external-ai` sends customer content to configured third-party services and therefore does not satisfy strict-local mode.
+The primary Groq implementation runs in `platform-api`/`platform-worker`; the older `external-ai` profile is retained only for reference. Any Groq processing sends customer content to a third party and therefore does not satisfy strict-local mode.
