@@ -1,25 +1,41 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+import csv
 import hashlib
+import io
+from pathlib import Path
 import secrets
 
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .config import get_settings
 from .database import Base, SessionLocal, engine, get_db
 from .dependencies import current_user, require_roles
-from .models import AgentPresence, AgentStatus, AuditEvent, Channel, ChannelConfig, ChatSession, Contact, Conversation, ConversationStatus, Message, QAAnswer, QAEvaluation, QAForm, QAQuestion, QAReview, QueueMember, Role, Tenant, User
+from .jobs import complete_job, record_failure, start_voice_finalization
+from .models import AgentPresence, AgentStatus, AssistEvent, AuditEvent, Campaign, Channel, ChannelConfig, ChatSession, ClientAccessGrant, Contact, Conversation, ConversationStatus, CostEvent, DurableJob, JobStatus, KnowledgeArticle, Message, QAAnswer, QAEvaluation, QAForm, QAQuestion, QAReview, QueueMember, Recording, Role, Script, SurveyResponse, Tenant, TranscriptSegment, User, VoiceSession, WorkQueue
 from .realtime import realtime_hub
-from .schemas import AssignRequest, ChatMessageCreate, ChatStartRequest, ConversationCreate, ConversationView, LoginRequest, PresenceUpdate, PresenceView, QAEvaluationCreate, QAFormCreate, QAReviewCreate, TokenResponse, UserView, WrapUpRequest
-from .security import create_access_token, decode_access_token, verify_password
+from .reporting import simple_pdf
+from .schemas import AssignRequest, ChatMessageCreate, ChatStartRequest, ConversationCreate, ConversationView, LoginRequest, PilotSetupUpdate, PresenceUpdate, PresenceView, PrivacyModeUpdate, QAEvaluationCreate, QAFormCreate, QAReviewCreate, SurveySubmit, TokenResponse, UserCreate, UserView, VoiceControlRequest, VoiceDialRequest, WrapUpRequest
+from .security import create_access_token, decode_access_token, hash_password, verify_password
 from .seed import seed_demo
 
 
 def audit(db: Session, user: User, action: str, entity_type: str, entity_id: str | None, details: dict | None = None) -> None:
     db.add(AuditEvent(tenant_id=user.tenant_id, actor_user_id=user.id, action=action, entity_type=entity_type, entity_id=entity_id, details=details or {}))
+
+
+def scoped_conversation_stmt(user: User):
+    stmt = select(Conversation).where(Conversation.tenant_id == user.tenant_id)
+    if user.role == Role.AGENT:
+        stmt = stmt.where(Conversation.assigned_user_id == user.id)
+    elif user.role == Role.CLIENT_VIEWER:
+        campaign_ids = select(ClientAccessGrant.campaign_id).where(ClientAccessGrant.user_id == user.id, ClientAccessGrant.tenant_id == user.tenant_id)
+        stmt = stmt.where(Conversation.campaign_id.in_(campaign_ids))
+    return stmt
 
 
 @asynccontextmanager
@@ -79,10 +95,7 @@ def update_presence(payload: PresenceUpdate, user: User = Depends(require_roles(
 
 @app.get("/conversations", response_model=list[ConversationView])
 def list_conversations(user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[ConversationView]:
-    stmt = select(Conversation).where(Conversation.tenant_id == user.tenant_id)
-    if user.role == Role.AGENT:
-        stmt = stmt.where(Conversation.assigned_user_id == user.id)
-    stmt = stmt.order_by(Conversation.created_at.desc()).limit(100)
+    stmt = scoped_conversation_stmt(user).order_by(Conversation.created_at.desc()).limit(100)
     return [ConversationView.model_validate(row) for row in db.scalars(stmt)]
 
 
@@ -101,7 +114,11 @@ def queued_work(user: User = Depends(require_roles(Role.AGENT)), db: Session = D
 @app.get("/queues")
 def list_queues(user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[dict]:
     from .models import WorkQueue
-    queues = db.scalars(select(WorkQueue).where(WorkQueue.tenant_id == user.tenant_id, WorkQueue.active.is_(True)).order_by(WorkQueue.name))
+    stmt = select(WorkQueue).where(WorkQueue.tenant_id == user.tenant_id, WorkQueue.active.is_(True))
+    if user.role == Role.CLIENT_VIEWER:
+        campaign_ids = select(ClientAccessGrant.campaign_id).where(ClientAccessGrant.user_id == user.id, ClientAccessGrant.tenant_id == user.tenant_id)
+        stmt = stmt.where(WorkQueue.campaign_id.in_(campaign_ids))
+    queues = db.scalars(stmt.order_by(WorkQueue.name))
     return [{"id": queue.id, "name": queue.name, "campaign_id": queue.campaign_id, "channels": queue.channels} for queue in queues]
 
 
@@ -160,6 +177,9 @@ async def claim_conversation(conversation_id: str, user: User = Depends(require_
         raise HTTPException(status_code=403, detail="Agent is not a member of this queue")
     conversation.assigned_user_id = user.id
     conversation.status = ConversationStatus.ACTIVE
+    voice_session = db.get(VoiceSession, conversation.id) if conversation.channel == Channel.VOICE else None
+    if voice_session:
+        voice_session.state = "active"
     presence = db.get(AgentPresence, user.id)
     if presence:
         presence.status = AgentStatus.BUSY
@@ -204,7 +224,164 @@ def _authorized_conversation(db: Session, user: User, conversation_id: str) -> C
         raise HTTPException(status_code=404, detail="Conversation not found")
     if user.role == Role.AGENT and conversation.assigned_user_id != user.id:
         raise HTTPException(status_code=403, detail="Conversation is not assigned to this agent")
+    if user.role == Role.CLIENT_VIEWER:
+        grant = db.scalar(select(ClientAccessGrant.id).where(ClientAccessGrant.user_id == user.id, ClientAccessGrant.campaign_id == conversation.campaign_id))
+        if grant is None:
+            raise HTTPException(status_code=403, detail="Conversation is outside the client's authorized scope")
     return conversation
+
+
+def _voice_view(session: VoiceSession) -> dict:
+    return {"conversation_id": session.conversation_id, "provider": session.provider, "provider_call_id": session.provider_call_id, "state": session.state, "muted": session.muted, "held": session.held, "transfer_target": session.transfer_target, "started_at": session.started_at.isoformat(), "ended_at": session.ended_at.isoformat() if session.ended_at else None}
+
+
+@app.post("/voice/calls/dial", status_code=201)
+async def dial_voice(payload: VoiceDialRequest, user: User = Depends(require_roles(Role.AGENT)), db: Session = Depends(get_db)) -> dict:
+    active = db.scalar(select(Conversation.id).where(Conversation.assigned_user_id == user.id, Conversation.status == ConversationStatus.ACTIVE))
+    if active:
+        raise HTTPException(status_code=409, detail="Agent already has an active interaction")
+    config = db.scalar(select(ChannelConfig).where(ChannelConfig.tenant_id == user.tenant_id, ChannelConfig.channel == Channel.VOICE, ChannelConfig.enabled.is_(True)))
+    if config is None:
+        raise HTTPException(status_code=409, detail="Voice channel is not configured")
+    queue = db.get(WorkQueue, config.settings.get("queue_id"))
+    if queue is None:
+        raise HTTPException(status_code=409, detail="Voice queue is not configured")
+    contact = Contact(tenant_id=user.tenant_id, name=payload.customer_name, phone=payload.phone, language=payload.language)
+    db.add(contact)
+    db.flush()
+    conversation = Conversation(tenant_id=user.tenant_id, campaign_id=queue.campaign_id, queue_id=queue.id, contact_id=contact.id, assigned_user_id=user.id, channel=Channel.VOICE, status=ConversationStatus.ACTIVE, direction="outbound", language=payload.language)
+    db.add(conversation)
+    db.flush()
+    session = VoiceSession(conversation_id=conversation.id, tenant_id=user.tenant_id, provider_call_id=f"local-{conversation.id}")
+    db.add(session)
+    db.add(AssistEvent(tenant_id=user.tenant_id, conversation_id=conversation.id, event_type="script", title="Opening", content="Greet the customer and state your name before discussing the order.", metadata_json={"source": "Customer Care Core v1"}))
+    presence = db.get(AgentPresence, user.id)
+    if presence:
+        presence.status = AgentStatus.BUSY
+        presence.current_conversation_id = conversation.id
+        presence.changed_at = datetime.now(timezone.utc)
+    audit(db, user, "voice.dialed", "conversation", conversation.id, {"provider": session.provider, "language": payload.language})
+    db.commit()
+    await realtime_hub.publish(user.tenant_id, {"type": "voice.started", "conversation_id": conversation.id}, user.id)
+    return {"conversation": ConversationView.model_validate(conversation), "session": _voice_view(session)}
+
+
+@app.post("/voice/calls/simulate-inbound", status_code=201)
+async def simulate_inbound_voice(payload: VoiceDialRequest, user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR)), db: Session = Depends(get_db)) -> dict:
+    config = db.scalar(select(ChannelConfig).where(ChannelConfig.tenant_id == user.tenant_id, ChannelConfig.channel == Channel.VOICE, ChannelConfig.enabled.is_(True)))
+    queue = db.get(WorkQueue, config.settings.get("queue_id")) if config else None
+    if queue is None:
+        raise HTTPException(status_code=409, detail="Voice queue is not configured")
+    contact = Contact(tenant_id=user.tenant_id, name=payload.customer_name, phone=payload.phone, language=payload.language)
+    db.add(contact)
+    db.flush()
+    conversation = Conversation(tenant_id=user.tenant_id, campaign_id=queue.campaign_id, queue_id=queue.id, contact_id=contact.id, channel=Channel.VOICE, status=ConversationStatus.QUEUED, direction="inbound", language=payload.language)
+    db.add(conversation)
+    db.flush()
+    session = VoiceSession(conversation_id=conversation.id, tenant_id=user.tenant_id, provider_call_id=f"local-inbound-{conversation.id}", state="ringing")
+    db.add(session)
+    audit(db, user, "voice.inbound_simulated", "conversation", conversation.id)
+    db.commit()
+    await realtime_hub.publish(user.tenant_id, {"type": "conversation.queued", "conversation_id": conversation.id, "channel": "voice"})
+    return {"conversation": ConversationView.model_validate(conversation), "session": _voice_view(session)}
+
+
+@app.post("/voice/calls/{conversation_id}/reject")
+async def reject_inbound_voice(conversation_id: str, user: User = Depends(require_roles(Role.AGENT)), db: Session = Depends(get_db)) -> dict:
+    conversation = db.get(Conversation, conversation_id)
+    session = db.get(VoiceSession, conversation_id)
+    if conversation is None or session is None or conversation.tenant_id != user.tenant_id or conversation.status != ConversationStatus.QUEUED:
+        raise HTTPException(status_code=409, detail="Inbound call is no longer ringing")
+    if conversation.queue_id and db.scalar(select(QueueMember.id).where(QueueMember.queue_id == conversation.queue_id, QueueMember.user_id == user.id)) is None:
+        raise HTTPException(status_code=403, detail="Agent is not a member of this queue")
+    conversation.status = ConversationStatus.FAILED
+    conversation.ended_at = datetime.now(timezone.utc)
+    conversation.disposition = "rejected"
+    session.state = "rejected"
+    session.ended_at = conversation.ended_at
+    audit(db, user, "voice.rejected", "conversation", conversation.id)
+    db.commit()
+    await realtime_hub.publish(user.tenant_id, {"type": "voice.rejected", "conversation_id": conversation.id})
+    return _voice_view(session)
+
+
+@app.get("/voice/calls/{conversation_id}")
+def get_voice_call(conversation_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    conversation = _authorized_conversation(db, user, conversation_id)
+    session = db.get(VoiceSession, conversation.id)
+    if conversation.channel != Channel.VOICE or session is None:
+        raise HTTPException(status_code=404, detail="Voice call not found")
+    return {"conversation": ConversationView.model_validate(conversation), "session": _voice_view(session)}
+
+
+@app.post("/voice/calls/{conversation_id}/control")
+async def control_voice(conversation_id: str, payload: VoiceControlRequest, user: User = Depends(require_roles(Role.AGENT)), db: Session = Depends(get_db)) -> dict:
+    conversation = _authorized_conversation(db, user, conversation_id)
+    session = db.get(VoiceSession, conversation.id)
+    if conversation.channel != Channel.VOICE or session is None:
+        raise HTTPException(status_code=404, detail="Voice call not found")
+    if session.state not in {"active", "held"}:
+        raise HTTPException(status_code=409, detail="Voice call has already ended")
+    if payload.action == "mute":
+        session.muted = True
+    elif payload.action == "unmute":
+        session.muted = False
+    elif payload.action == "hold":
+        session.held = True
+        session.state = "held"
+    elif payload.action == "resume":
+        session.held = False
+        session.state = "active"
+    elif payload.action == "transfer":
+        if not payload.target:
+            raise HTTPException(status_code=400, detail="Transfer target is required")
+        session.transfer_target = payload.target
+    job: DurableJob | None = None
+    if payload.action == "hangup":
+        session.state = "ended"
+        session.ended_at = datetime.now(timezone.utc)
+        conversation.status = ConversationStatus.WRAP_UP
+        presence = db.get(AgentPresence, user.id)
+        if presence:
+            presence.status = AgentStatus.WRAP_UP
+            presence.current_conversation_id = conversation.id
+            presence.changed_at = datetime.now(timezone.utc)
+    audit(db, user, f"voice.{payload.action}", "conversation", conversation.id, {"target": payload.target})
+    if payload.action == "hangup":
+        job = start_voice_finalization(db, conversation)
+        try:
+            complete_job(db, job.id)
+        except Exception as error:
+            record_failure(db, job.id, error)
+            raise HTTPException(status_code=500, detail="Voice evidence processing was queued for retry") from error
+    else:
+        db.commit()
+    db.refresh(session)
+    await realtime_hub.publish(user.tenant_id, {"type": f"voice.{payload.action}", "conversation_id": conversation.id, "session": _voice_view(session)}, user.id)
+    return _voice_view(session)
+
+
+@app.get("/conversations/{conversation_id}/transcript")
+def conversation_transcript(conversation_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[dict]:
+    _authorized_conversation(db, user, conversation_id)
+    segments = db.scalars(select(TranscriptSegment).where(TranscriptSegment.conversation_id == conversation_id).order_by(TranscriptSegment.start_ms))
+    return [{"id": segment.id, "speaker": segment.speaker, "text": segment.text, "start_ms": segment.start_ms, "end_ms": segment.end_ms, "language": segment.language, "confidence": segment.confidence} for segment in segments]
+
+
+@app.get("/conversations/{conversation_id}/assist")
+def conversation_assist(conversation_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[dict]:
+    _authorized_conversation(db, user, conversation_id)
+    events = db.scalars(select(AssistEvent).where(AssistEvent.conversation_id == conversation_id).order_by(AssistEvent.created_at))
+    return [{"id": event.id, "event_type": event.event_type, "title": event.title, "content": event.content, "evidence_start_ms": event.evidence_start_ms, "evidence_end_ms": event.evidence_end_ms, "metadata": event.metadata_json} for event in events]
+
+
+@app.get("/conversations/{conversation_id}/recording")
+def conversation_recording(conversation_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> FileResponse:
+    _authorized_conversation(db, user, conversation_id)
+    recording = db.scalar(select(Recording).where(Recording.conversation_id == conversation_id))
+    if recording is None or not Path(recording.storage_key).is_file():
+        raise HTTPException(status_code=404, detail="Recording not found")
+    return FileResponse(recording.storage_key, media_type=recording.mime_type, filename=f"{conversation_id}.wav", headers={"Accept-Ranges": "bytes"})
 
 
 @app.get("/conversations/{conversation_id}/messages")
@@ -247,10 +424,13 @@ async def start_public_chat(payload: ChatStartRequest, db: Session = Depends(get
     if config is None or not secrets.compare_digest(config.public_key_hash or "", hashlib.sha256(payload.widget_key.encode()).hexdigest()):
         raise HTTPException(status_code=404, detail="Chat widget not found")
     queue_id = config.settings.get("queue_id")
+    queue = db.get(WorkQueue, queue_id)
+    if queue is None:
+        raise HTTPException(status_code=503, detail="Chat queue is unavailable")
     contact = Contact(tenant_id=tenant.id, name=payload.customer_name, email=str(payload.customer_email) if payload.customer_email else None, language=payload.language)
     db.add(contact)
     db.flush()
-    conversation = Conversation(tenant_id=tenant.id, queue_id=queue_id, contact_id=contact.id, channel=Channel.WEB_CHAT, status=ConversationStatus.QUEUED, direction="inbound", language=payload.language)
+    conversation = Conversation(tenant_id=tenant.id, campaign_id=queue.campaign_id, queue_id=queue_id, contact_id=contact.id, channel=Channel.WEB_CHAT, status=ConversationStatus.QUEUED, direction="inbound", language=payload.language)
     db.add(conversation)
     db.flush()
     message = Message(conversation_id=conversation.id, sender_type="customer", content=payload.initial_message, sequence=1)
@@ -284,6 +464,33 @@ async def send_customer_message(conversation_id: str, payload: ChatMessageCreate
     return _message_view(message)
 
 
+@app.get("/public/chat/{conversation_id}/status")
+def public_chat_status(conversation_id: str, x_chat_session: str = Header(alias="X-Chat-Session"), db: Session = Depends(get_db)) -> dict:
+    _valid_chat_session(db, conversation_id, x_chat_session)
+    conversation = db.get(Conversation, conversation_id)
+    if conversation is None or conversation.channel != Channel.WEB_CHAT:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    survey = db.scalar(select(SurveyResponse).where(SurveyResponse.conversation_id == conversation.id))
+    return {"status": conversation.status.value, "actual_csat": survey.actual_csat if survey else None}
+
+
+@app.post("/public/chat/{conversation_id}/survey", status_code=201)
+def submit_chat_survey(conversation_id: str, payload: SurveySubmit, x_chat_session: str = Header(alias="X-Chat-Session"), db: Session = Depends(get_db)) -> dict:
+    session = _valid_chat_session(db, conversation_id, x_chat_session)
+    conversation = db.get(Conversation, conversation_id)
+    if conversation is None or conversation.status != ConversationStatus.CLOSED:
+        raise HTTPException(status_code=409, detail="Survey is available after the conversation closes")
+    survey = db.scalar(select(SurveyResponse).where(SurveyResponse.conversation_id == conversation.id))
+    if survey is None:
+        survey = SurveyResponse(tenant_id=session.tenant_id, conversation_id=conversation.id, source="customer_widget")
+        db.add(survey)
+    survey.actual_csat = payload.csat
+    survey.source = "customer_widget"
+    survey.received_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"actual_csat": survey.actual_csat, "source": survey.source}
+
+
 @app.websocket("/realtime")
 async def realtime_events(websocket: WebSocket) -> None:
     protocols = [value.strip() for value in websocket.headers.get("sec-websocket-protocol", "").split(",")]
@@ -311,8 +518,9 @@ async def realtime_events(websocket: WebSocket) -> None:
 
 @app.get("/dashboard/summary")
 def dashboard_summary(user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR, Role.QA_REVIEWER, Role.CLIENT_VIEWER)), db: Session = Depends(get_db)) -> dict:
-    counts = dict(db.execute(select(Conversation.status, func.count()).where(Conversation.tenant_id == user.tenant_id).group_by(Conversation.status)).all())
-    presence_counts = dict(db.execute(select(AgentPresence.status, func.count()).where(AgentPresence.tenant_id == user.tenant_id).group_by(AgentPresence.status)).all())
+    scoped = scoped_conversation_stmt(user).subquery()
+    counts = dict(db.execute(select(scoped.c.status, func.count()).group_by(scoped.c.status)).all())
+    presence_counts = {} if user.role == Role.CLIENT_VIEWER else dict(db.execute(select(AgentPresence.status, func.count()).where(AgentPresence.tenant_id == user.tenant_id).group_by(AgentPresence.status)).all())
     return {
         "conversations": {conversation_status.value: counts.get(conversation_status, 0) for conversation_status in ConversationStatus},
         "agents": {agent_status.value: presence_counts.get(agent_status, 0) for agent_status in AgentStatus},
@@ -378,3 +586,167 @@ def review_qa_evaluation(evaluation_id: str, payload: QAReviewCreate, user: User
     audit(db, user, "qa_evaluation.reviewed", "qa_evaluation", evaluation.id, {"previous_score": previous_score, "reviewed_score": payload.reviewed_score, "reason": payload.reason})
     db.commit()
     return {"id": review.id, "automatic_score": evaluation.automatic_score, "reviewed_score": evaluation.reviewed_score, "status": evaluation.status}
+
+
+@app.get("/qa/evaluations")
+def list_qa_evaluations(user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR, Role.QA_REVIEWER, Role.CLIENT_VIEWER)), db: Session = Depends(get_db)) -> list[dict]:
+    scoped = scoped_conversation_stmt(user).subquery()
+    evaluations = db.scalars(select(QAEvaluation).join(scoped, scoped.c.id == QAEvaluation.conversation_id).order_by(QAEvaluation.created_at.desc()).limit(100))
+    return [{"id": evaluation.id, "conversation_id": evaluation.conversation_id, "automatic_score": evaluation.automatic_score, "reviewed_score": evaluation.reviewed_score, "effective_score": evaluation.reviewed_score if evaluation.reviewed_score is not None else evaluation.automatic_score, "fatal_triggered": evaluation.fatal_triggered, "status": evaluation.status, "provider": evaluation.provider, "model": evaluation.model, "summary": evaluation.summary, "created_at": evaluation.created_at.isoformat()} for evaluation in evaluations]
+
+
+@app.get("/qa/evaluations/{evaluation_id}")
+def qa_evaluation_detail(evaluation_id: str, user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR, Role.QA_REVIEWER, Role.CLIENT_VIEWER)), db: Session = Depends(get_db)) -> dict:
+    evaluation = db.get(QAEvaluation, evaluation_id)
+    if evaluation is None:
+        raise HTTPException(status_code=404, detail="QA evaluation not found")
+    _authorized_conversation(db, user, evaluation.conversation_id)
+    answers = db.execute(select(QAAnswer, QAQuestion).join(QAQuestion, QAQuestion.id == QAAnswer.question_id).where(QAAnswer.evaluation_id == evaluation.id).order_by(QAQuestion.position)).all()
+    reviews = db.scalars(select(QAReview).where(QAReview.evaluation_id == evaluation.id).order_by(QAReview.created_at))
+    return {
+        "id": evaluation.id,
+        "conversation_id": evaluation.conversation_id,
+        "automatic_score": evaluation.automatic_score,
+        "reviewed_score": evaluation.reviewed_score,
+        "status": evaluation.status,
+        "summary": evaluation.summary,
+        "answers": [{"id": answer.id, "question": question.label, "passed": answer.passed, "score": answer.score, "confidence": answer.confidence, "evidence_quote": answer.evidence_quote, "evidence_start_ms": answer.evidence_start_ms, "evidence_end_ms": answer.evidence_end_ms, "reasoning": answer.reasoning} for answer, question in answers],
+        "reviews": [{"id": review.id, "previous_score": review.previous_score, "reviewed_score": review.reviewed_score, "reason": review.reason, "created_at": review.created_at.isoformat()} for review in reviews],
+    }
+
+
+@app.get("/configuration")
+def configuration(user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    tenant = db.get(Tenant, user.tenant_id)
+    campaign_stmt = select(Campaign).where(Campaign.tenant_id == user.tenant_id)
+    queue_stmt = select(WorkQueue).where(WorkQueue.tenant_id == user.tenant_id)
+    script_stmt = select(Script).where(Script.tenant_id == user.tenant_id, Script.active.is_(True))
+    article_stmt = select(KnowledgeArticle).where(KnowledgeArticle.tenant_id == user.tenant_id, KnowledgeArticle.active.is_(True))
+    form_stmt = select(QAForm).where(QAForm.tenant_id == user.tenant_id, QAForm.active.is_(True))
+    if user.role == Role.CLIENT_VIEWER:
+        campaign_ids = select(ClientAccessGrant.campaign_id).where(ClientAccessGrant.user_id == user.id, ClientAccessGrant.tenant_id == user.tenant_id)
+        campaign_stmt = campaign_stmt.where(Campaign.id.in_(campaign_ids))
+        queue_stmt = queue_stmt.where(WorkQueue.campaign_id.in_(campaign_ids))
+        script_stmt = script_stmt.where(Script.campaign_id.in_(campaign_ids))
+        article_stmt = article_stmt.where(KnowledgeArticle.campaign_id.in_(campaign_ids))
+        form_stmt = form_stmt.where(QAForm.campaign_id.in_(campaign_ids))
+    campaigns = db.scalars(campaign_stmt.order_by(Campaign.name))
+    queues = db.scalars(queue_stmt.order_by(WorkQueue.name))
+    scripts = db.scalars(script_stmt.order_by(Script.name))
+    articles = db.scalars(article_stmt.order_by(KnowledgeArticle.title))
+    forms = db.scalars(form_stmt.order_by(QAForm.name))
+    users = list(db.scalars(select(User).where(User.tenant_id == user.tenant_id).order_by(User.display_name))) if user.role == Role.ADMIN else []
+    return {"tenant": {"id": tenant.id, "name": tenant.name, "ai_mode": tenant.ai_mode}, "campaigns": [{"id": item.id, "name": item.name, "direction": item.direction} for item in campaigns], "queues": [{"id": item.id, "name": item.name, "campaign_id": item.campaign_id, "channels": item.channels} for item in queues], "scripts": [{"id": item.id, "name": item.name, "version": item.version, "language": item.language, "content": item.content, "required_steps": item.required_steps} for item in scripts], "knowledge": [{"id": item.id, "title": item.title, "language": item.language, "content": item.content, "tags": item.tags} for item in articles], "qa_forms": [{"id": item.id, "name": item.name, "version": item.version, "campaign_id": item.campaign_id} for item in forms], "users": [{"id": item.id, "email": item.email, "display_name": item.display_name, "role": item.role.value, "active": item.active} for item in users]}
+
+
+@app.put("/configuration/pilot")
+def update_pilot_configuration(payload: PilotSetupUpdate, user: User = Depends(require_roles(Role.ADMIN)), db: Session = Depends(get_db)) -> dict:
+    campaign = db.scalar(select(Campaign).where(Campaign.tenant_id == user.tenant_id, Campaign.active.is_(True)).order_by(Campaign.created_at))
+    queue = db.scalar(select(WorkQueue).where(WorkQueue.tenant_id == user.tenant_id, WorkQueue.active.is_(True)).order_by(WorkQueue.name))
+    script = db.scalar(select(Script).where(Script.tenant_id == user.tenant_id, Script.active.is_(True)).order_by(Script.created_at))
+    article = db.scalar(select(KnowledgeArticle).where(KnowledgeArticle.tenant_id == user.tenant_id, KnowledgeArticle.active.is_(True)).order_by(KnowledgeArticle.created_at))
+    form = db.scalar(select(QAForm).where(QAForm.tenant_id == user.tenant_id, QAForm.active.is_(True)).order_by(QAForm.created_at))
+    if not all([campaign, queue, script, article, form]):
+        raise HTTPException(status_code=409, detail="Pilot seed configuration is incomplete")
+    campaign.name = payload.campaign_name
+    queue.name = payload.queue_name
+    script.content = payload.script_content
+    script.required_steps = payload.required_steps
+    article.title = payload.knowledge_title
+    article.content = payload.knowledge_content
+    form.name = payload.qa_form_name
+    audit(db, user, "configuration.pilot_updated", "campaign", campaign.id, {"queue_id": queue.id, "script_id": script.id, "knowledge_id": article.id, "qa_form_id": form.id})
+    db.commit()
+    return {"status": "saved"}
+
+
+@app.post("/users", response_model=UserView, status_code=201)
+def create_user(payload: UserCreate, user: User = Depends(require_roles(Role.ADMIN)), db: Session = Depends(get_db)) -> UserView:
+    if db.scalar(select(User.id).where(User.tenant_id == user.tenant_id, func.lower(User.email) == str(payload.email).lower())):
+        raise HTTPException(status_code=409, detail="A user with this email already exists")
+    created = User(tenant_id=user.tenant_id, email=str(payload.email).lower(), display_name=payload.display_name, password_hash=hash_password(payload.password), role=payload.role)
+    db.add(created)
+    db.flush()
+    if created.role == Role.AGENT:
+        queue = db.scalar(select(WorkQueue).where(WorkQueue.tenant_id == user.tenant_id, WorkQueue.active.is_(True)).order_by(WorkQueue.name))
+        if queue:
+            db.add(QueueMember(queue_id=queue.id, user_id=created.id))
+        db.add(AgentPresence(user_id=created.id, tenant_id=user.tenant_id, status=AgentStatus.OFFLINE))
+    elif created.role == Role.CLIENT_VIEWER:
+        campaign = db.scalar(select(Campaign).where(Campaign.tenant_id == user.tenant_id, Campaign.active.is_(True)).order_by(Campaign.created_at))
+        if campaign:
+            db.add(ClientAccessGrant(tenant_id=user.tenant_id, user_id=created.id, campaign_id=campaign.id))
+    audit(db, user, "user.created", "user", created.id, {"role": created.role.value})
+    db.commit()
+    db.refresh(created)
+    return UserView.model_validate(created)
+
+
+@app.put("/configuration/privacy")
+def update_privacy(payload: PrivacyModeUpdate, user: User = Depends(require_roles(Role.ADMIN)), db: Session = Depends(get_db)) -> dict:
+    tenant = db.get(Tenant, user.tenant_id)
+    tenant.ai_mode = payload.ai_mode
+    audit(db, user, "privacy.mode_changed", "tenant", tenant.id, {"ai_mode": payload.ai_mode})
+    db.commit()
+    return {"ai_mode": tenant.ai_mode}
+
+
+@app.get("/diagnostics")
+def diagnostics(user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR)), db: Session = Depends(get_db)) -> dict:
+    tenant = db.get(Tenant, user.tenant_id)
+    oldest = db.scalar(select(func.min(Conversation.created_at)).where(Conversation.tenant_id == user.tenant_id, Conversation.status == ConversationStatus.QUEUED))
+    lag = max(int((datetime.now(timezone.utc) - oldest.replace(tzinfo=timezone.utc)).total_seconds()), 0) if oldest else 0
+    recording_dir = Path(settings.recording_dir)
+    recording_bytes = sum(item.stat().st_size for item in recording_dir.glob("*.wav")) if recording_dir.exists() else 0
+    channels = db.scalars(select(ChannelConfig).where(ChannelConfig.tenant_id == user.tenant_id))
+    jobs = dict(db.execute(select(DurableJob.status, func.count()).where(DurableJob.tenant_id == user.tenant_id).group_by(DurableJob.status)).all())
+    return {"status": "ok", "database": "connected", "privacy": {"mode": tenant.ai_mode, "customer_content_egress": tenant.ai_mode != "local", "provider": "local_rules" if tenant.ai_mode == "local" else "external_config_required"}, "queue": {"oldest_wait_seconds": lag}, "jobs": {status.value: count for status, count in jobs.items()}, "storage": {"recording_bytes": recording_bytes, "path": settings.recording_dir}, "channels": {item.channel.value: {"enabled": item.enabled, "provider": item.settings.get("provider", "internal")} for item in channels}}
+
+
+def _report_conversations(db: Session, user: User, channel: Channel | None, campaign_id: str | None, queue_id: str | None, agent_id: str | None) -> list[Conversation]:
+    stmt = scoped_conversation_stmt(user)
+    if channel:
+        stmt = stmt.where(Conversation.channel == channel)
+    if campaign_id:
+        stmt = stmt.where(Conversation.campaign_id == campaign_id)
+    if queue_id:
+        stmt = stmt.where(Conversation.queue_id == queue_id)
+    if agent_id:
+        stmt = stmt.where(Conversation.assigned_user_id == agent_id)
+    return list(db.scalars(stmt.order_by(Conversation.started_at.desc()).limit(1000)))
+
+
+@app.get("/reports/summary")
+def report_summary(channel: Channel | None = None, campaign_id: str | None = None, queue_id: str | None = None, agent_id: str | None = None, user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR, Role.QA_REVIEWER, Role.CLIENT_VIEWER)), db: Session = Depends(get_db)) -> dict:
+    rows = _report_conversations(db, user, channel, campaign_id, queue_id, agent_id)
+    ids = [row.id for row in rows]
+    evaluations = list(db.scalars(select(QAEvaluation).where(QAEvaluation.conversation_id.in_(ids)))) if ids else []
+    actual_surveys = list(db.scalars(select(SurveyResponse).where(SurveyResponse.conversation_id.in_(ids), SurveyResponse.actual_csat.is_not(None)))) if ids else []
+    predicted = list(db.scalars(select(SurveyResponse).where(SurveyResponse.conversation_id.in_(ids), SurveyResponse.predicted_satisfaction_risk.is_not(None)))) if ids else []
+    return {"filters": {"channel": channel.value if channel else None, "campaign_id": campaign_id, "queue_id": queue_id, "agent_id": agent_id}, "conversation_count": len(rows), "closed_count": sum(row.status == ConversationStatus.CLOSED for row in rows), "average_qa": round(sum((item.reviewed_score if item.reviewed_score is not None else item.automatic_score) for item in evaluations) / len(evaluations), 1) if evaluations else None, "actual_csat_count": len(actual_surveys), "average_actual_csat": round(sum(item.actual_csat for item in actual_surveys if item.actual_csat) / len(actual_surveys), 1) if actual_surveys else None, "predicted_risk_count": len(predicted), "average_predicted_risk": round(sum(item.predicted_satisfaction_risk for item in predicted if item.predicted_satisfaction_risk is not None) / len(predicted), 1) if predicted else None}
+
+
+@app.get("/reports/export.csv")
+def export_csv(channel: Channel | None = None, campaign_id: str | None = None, queue_id: str | None = None, agent_id: str | None = None, user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR, Role.QA_REVIEWER, Role.CLIENT_VIEWER)), db: Session = Depends(get_db)) -> Response:
+    rows = _report_conversations(db, user, channel, campaign_id, queue_id, agent_id)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["conversation_id", "channel", "direction", "language", "status", "agent_id", "started_at", "ended_at", "disposition"])
+    for row in rows:
+        writer.writerow([row.id, row.channel.value, row.direction, row.language, row.status.value, row.assigned_user_id or "", row.started_at.isoformat(), row.ended_at.isoformat() if row.ended_at else "", row.disposition or ""])
+    return Response(output.getvalue(), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=aperture-cx-report.csv"})
+
+
+@app.get("/reports/export.pdf")
+def export_pdf(channel: Channel | None = None, campaign_id: str | None = None, queue_id: str | None = None, agent_id: str | None = None, user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR, Role.QA_REVIEWER, Role.CLIENT_VIEWER)), db: Session = Depends(get_db)) -> Response:
+    rows = _report_conversations(db, user, channel, campaign_id, queue_id, agent_id)
+    lines = [f"Generated: {datetime.now(timezone.utc).isoformat()}", f"Conversations: {len(rows)}", ""]
+    lines.extend(f"{row.started_at:%Y-%m-%d %H:%M} | {row.channel.value} | {row.language} | {row.status.value} | {row.disposition or '-'}" for row in rows)
+    return Response(simple_pdf("Aperture CX Client Report", lines), media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=aperture-cx-report.pdf"})
+
+
+@app.get("/reports/costs")
+def report_costs(user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR, Role.CLIENT_VIEWER)), db: Session = Depends(get_db)) -> dict:
+    scoped = scoped_conversation_stmt(user).subquery()
+    rows = db.execute(select(CostEvent.category, CostEvent.provider, func.sum(CostEvent.units), CostEvent.unit_name, func.sum(CostEvent.cost_micros_inr)).join(scoped, scoped.c.id == CostEvent.conversation_id).group_by(CostEvent.category, CostEvent.provider, CostEvent.unit_name)).all()
+    return {"currency": "INR", "items": [{"category": category, "provider": provider, "units": units, "unit_name": unit_name, "cost_micros_inr": cost} for category, provider, units, unit_name, cost in rows], "total_cost_micros_inr": sum(row[4] for row in rows)}

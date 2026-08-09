@@ -25,6 +25,7 @@ services:
     restart: unless-stopped
 
   qa-scoring:
+    profiles: ["external-ai"]
     build: ./services/qa-scoring
     environment:
       GROQ_API_KEY: ${GROQ_API_KEY}
@@ -41,6 +42,7 @@ services:
     restart: unless-stopped
 
   realtime-assist:
+    profiles: ["external-ai"]
     build: ./services/realtime-assist
     environment:
       GROQ_API_KEY: ${GROQ_API_KEY}
@@ -74,16 +76,45 @@ services:
       PLATFORM_SEED_ADMIN_PASSWORD: ${PLATFORM_SEED_ADMIN_PASSWORD}
       PLATFORM_SEED_CHAT_WIDGET_KEY: ${PLATFORM_SEED_CHAT_WIDGET_KEY:-pilot-widget-key-change-me}
       PLATFORM_CORS_ORIGINS: ${PLATFORM_CORS_ORIGINS:-http://localhost:4173,http://localhost:5173,http://localhost:18081}
+      PLATFORM_RECORDING_DIR: /data/recordings
+      PLATFORM_VOICE_FIXTURE_PATH: /fixtures/deterministic-pilot.wav
+      PLATFORM_VOICE_FIXTURE_MANIFEST_PATH: /fixtures/deterministic-pilot.json
     ports:
       - "${PLATFORM_API_PORT:-18080}:8000"
     depends_on:
       postgres:
         condition: service_healthy
+    volumes:
+      - recording-data:/data/recordings
+      - ./asterisk/test-audio/deterministic-pilot.wav:/fixtures/deterministic-pilot.wav:ro
+      - ./asterisk/test-audio/deterministic-pilot.json:/fixtures/deterministic-pilot.json:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
+
+  platform-worker:
+    build: ./services/platform-api
+    command: ["python", "-m", "app.worker"]
+    environment:
+      PLATFORM_ENVIRONMENT: ${PLATFORM_ENVIRONMENT:-development}
+      PLATFORM_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT}/${POSTGRES_DB}
+      PLATFORM_JWT_SECRET: ${PLATFORM_JWT_SECRET}
+      PLATFORM_SEED_DEMO: "false"
+      PLATFORM_SEED_ADMIN_PASSWORD: ${PLATFORM_SEED_ADMIN_PASSWORD}
+      PLATFORM_SEED_CHAT_WIDGET_KEY: ${PLATFORM_SEED_CHAT_WIDGET_KEY:-pilot-widget-key-change-me}
+      PLATFORM_RECORDING_DIR: /data/recordings
+      PLATFORM_VOICE_FIXTURE_PATH: /fixtures/deterministic-pilot.wav
+      PLATFORM_VOICE_FIXTURE_MANIFEST_PATH: /fixtures/deterministic-pilot.json
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - recording-data:/data/recordings
+      - ./asterisk/test-audio/deterministic-pilot.wav:/fixtures/deterministic-pilot.wav:ro
+      - ./asterisk/test-audio/deterministic-pilot.json:/fixtures/deterministic-pilot.json:ro
     restart: unless-stopped
 
   console:
@@ -96,6 +127,7 @@ services:
     restart: unless-stopped
 
   agent-ui:
+    profiles: ["legacy-ui"]
     build: ./services/agent-ui
     ports:
       - "${AGENT_UI_PORT}:80"
@@ -105,6 +137,7 @@ services:
     restart: unless-stopped
 
   metabase:
+    profiles: ["legacy-dashboard"]
     image: metabase/metabase:latest
     ports:
       - "${METABASE_PORT}:3000"
@@ -118,6 +151,7 @@ services:
     restart: unless-stopped
 
   metabase-provision:
+    profiles: ["legacy-dashboard"]
     build: ./dashboard/metabase_provision
     environment:
       METABASE_SITE_URL: http://metabase:3000
@@ -135,3 +169,4 @@ services:
 volumes:
   pgdata:
   metabase-data:
+  recording-data:

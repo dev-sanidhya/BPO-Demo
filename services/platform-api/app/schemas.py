@@ -76,6 +76,38 @@ class WrapUpRequest(BaseModel):
     summary: str = Field(min_length=2, max_length=5000)
 
 
+class VoiceDialRequest(BaseModel):
+    phone: str = Field(min_length=3, max_length=40)
+    customer_name: str = Field(default="Voice customer", min_length=1, max_length=160)
+    language: str = Field(default="en", pattern="^en$")
+
+
+class VoiceControlRequest(BaseModel):
+    action: str = Field(pattern="^(mute|unmute|hold|resume|transfer|hangup)$")
+    target: str | None = Field(default=None, max_length=160)
+
+
+class PrivacyModeUpdate(BaseModel):
+    ai_mode: str = Field(pattern="^(local|external)$")
+
+
+class PilotSetupUpdate(BaseModel):
+    campaign_name: str = Field(min_length=3, max_length=160)
+    queue_name: str = Field(min_length=3, max_length=160)
+    script_content: str = Field(min_length=20, max_length=10000)
+    required_steps: list[str] = Field(min_length=1, max_length=20)
+    knowledge_title: str = Field(min_length=3, max_length=240)
+    knowledge_content: str = Field(min_length=20, max_length=10000)
+    qa_form_name: str = Field(min_length=3, max_length=160)
+
+
+class UserCreate(BaseModel):
+    email: EmailStr
+    display_name: str = Field(min_length=2, max_length=160)
+    role: Role
+    password: str = Field(min_length=12, max_length=128)
+
+
 class QAQuestionCreate(BaseModel):
     label: str = Field(min_length=3, max_length=300)
     guidance: str = ""
@@ -126,3 +158,7 @@ class ChatStartRequest(BaseModel):
 
 class ChatMessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=5000)
+
+
+class SurveySubmit(BaseModel):
+    csat: int = Field(ge=1, le=5)

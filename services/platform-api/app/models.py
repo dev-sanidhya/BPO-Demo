@@ -114,6 +114,16 @@ class QueueMember(Base):
     priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
+class ClientAccessGrant(Base):
+    __tablename__ = "client_access_grants"
+    __table_args__ = (UniqueConstraint("user_id", "campaign_id", name="uq_client_campaign_grant"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True, nullable=False)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    campaign_id: Mapped[str] = mapped_column(ForeignKey("campaigns.id", ondelete="CASCADE"), index=True, nullable=False)
+
+
 class Contact(Base):
     __tablename__ = "contacts"
 
@@ -165,6 +175,53 @@ class Message(Base):
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     metadata_json: Mapped[dict] = mapped_column("metadata", JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class TranscriptSegment(Base):
+    __tablename__ = "transcript_segments"
+    __table_args__ = (Index("idx_transcript_conversation_start", "conversation_id", "start_ms"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True, nullable=False)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False)
+    speaker: Mapped[str] = mapped_column(String(20), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    start_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    language: Mapped[str] = mapped_column(String(20), nullable=False)
+    confidence: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class AssistEvent(Base):
+    __tablename__ = "assist_events"
+    __table_args__ = (Index("idx_assist_conversation_created", "conversation_id", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True, nullable=False)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    title: Mapped[str] = mapped_column(String(160), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_start_ms: Mapped[int | None] = mapped_column(Integer)
+    evidence_end_ms: Mapped[int | None] = mapped_column(Integer)
+    metadata_json: Mapped[dict] = mapped_column("metadata", JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class VoiceSession(Base):
+    __tablename__ = "voice_sessions"
+
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True, nullable=False)
+    provider: Mapped[str] = mapped_column(String(40), default="deterministic_local", nullable=False)
+    provider_call_id: Mapped[str] = mapped_column(String(160), unique=True, nullable=False)
+    state: Mapped[str] = mapped_column(String(30), default="active", nullable=False)
+    muted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    held: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    transfer_target: Mapped[str | None] = mapped_column(String(160))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AgentPresence(Base):
