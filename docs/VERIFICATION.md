@@ -28,3 +28,11 @@ This file records what was exercised against the current source tree. A source c
 
 New implementation layers must add their commands, fixtures, results, and remaining limitations below this baseline.
 
+## Unified API Foundation - 2026-08-09
+
+- Built `services/platform-api` from a clean Python 3.12 image using the pinned dependency set.
+- Ran five isolated API tests: authentication/current user, role denial, tenant-scoped assignment and agent work visibility, agent presence, and client-viewer denial. Result: **5 passed**.
+- Booted the API against the repository's PostgreSQL 16 service, passed `/health`, authenticated the seeded admin, and confirmed five users plus the login audit event in Postgres.
+- Confirmed non-development configuration fails fast when JWT or seed credentials retain development defaults.
+
+The foundation currently owns tenants, users/roles, campaigns, queues/membership, contacts, conversations, messages, agent presence, and audit events. QA, scripts/knowledge, recordings, durable jobs, cost events, survey responses, and channel-specific data remain in subsequent implementation layers.
