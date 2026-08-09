@@ -5,3 +5,10 @@ __pycache__/
 !asterisk/test-audio/*.wav
 node_modules/
 services/agent-ui/vendor/
+CLAUDE.md
+AGENTS.md
+MEMORY.md
+ERRORS.md
+SESSION_NOTES.md
+.claude/
+.agents/
