@@ -2,37 +2,60 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import get_settings
-from .models import AgentPresence, AgentStatus, Campaign, QueueMember, Role, Tenant, User, WorkQueue
+import hashlib
+
+from .models import AgentPresence, AgentStatus, Campaign, Channel, ChannelConfig, QueueMember, Role, Tenant, User, WorkQueue
 from .security import hash_password
 
 
 def seed_demo(db: Session) -> None:
     settings = get_settings()
-    if not settings.seed_demo or db.scalar(select(Tenant.id).limit(1)):
+    if not settings.seed_demo:
         return
 
-    tenant = Tenant(name="Aperture BPO Pilot", slug="aperture-pilot", ai_mode="local")
-    db.add(tenant)
-    db.flush()
+    tenant = db.scalar(select(Tenant).where(Tenant.slug == "aperture-pilot"))
+    if tenant is None:
+        tenant = Tenant(name="Aperture BPO Pilot", slug="aperture-pilot", ai_mode="local")
+        db.add(tenant)
+        db.flush()
 
-    users = [
-        User(tenant_id=tenant.id, email=settings.seed_admin_email.lower(), display_name="Pilot Admin", password_hash=hash_password(settings.seed_admin_password), role=Role.ADMIN),
-        User(tenant_id=tenant.id, email="supervisor@pilot.example", display_name="Maya Supervisor", password_hash=hash_password(settings.seed_admin_password), role=Role.SUPERVISOR),
-        User(tenant_id=tenant.id, email="agent1@pilot.example", display_name="Aarav Agent", password_hash=hash_password(settings.seed_admin_password), role=Role.AGENT),
-        User(tenant_id=tenant.id, email="agent2@pilot.example", display_name="Meera Agent", password_hash=hash_password(settings.seed_admin_password), role=Role.AGENT),
-        User(tenant_id=tenant.id, email="client@pilot.example", display_name="Client Viewer", password_hash=hash_password(settings.seed_admin_password), role=Role.CLIENT_VIEWER),
+    user_specs = [
+        (settings.seed_admin_email.lower(), "Pilot Admin", Role.ADMIN),
+        ("supervisor@pilot.example", "Maya Supervisor", Role.SUPERVISOR),
+        ("agent1@pilot.example", "Aarav Agent", Role.AGENT),
+        ("agent2@pilot.example", "Meera Agent", Role.AGENT),
+        ("client@pilot.example", "Client Viewer", Role.CLIENT_VIEWER),
     ]
-    db.add_all(users)
-    db.flush()
+    users: list[User] = []
+    for email, display_name, role in user_specs:
+        user = db.scalar(select(User).where(User.tenant_id == tenant.id, User.email == email))
+        if user is None:
+            user = User(tenant_id=tenant.id, email=email, display_name=display_name, password_hash=hash_password(settings.seed_admin_password), role=role)
+            db.add(user)
+            db.flush()
+        users.append(user)
 
-    campaign = Campaign(tenant_id=tenant.id, name="Customer Care Pilot", direction="blended")
-    db.add(campaign)
-    db.flush()
-    queue = WorkQueue(tenant_id=tenant.id, campaign_id=campaign.id, name="Pilot Support", channels=["voice", "web_chat"])
-    db.add(queue)
-    db.flush()
+    campaign = db.scalar(select(Campaign).where(Campaign.tenant_id == tenant.id, Campaign.name == "Customer Care Pilot"))
+    if campaign is None:
+        campaign = Campaign(tenant_id=tenant.id, name="Customer Care Pilot", direction="blended")
+        db.add(campaign)
+        db.flush()
+    queue = db.scalar(select(WorkQueue).where(WorkQueue.tenant_id == tenant.id, WorkQueue.name == "Pilot Support"))
+    if queue is None:
+        queue = WorkQueue(tenant_id=tenant.id, campaign_id=campaign.id, name="Pilot Support", channels=["voice", "web_chat"])
+        db.add(queue)
+        db.flush()
 
     for user in users[2:4]:
-        db.add(QueueMember(queue_id=queue.id, user_id=user.id))
-        db.add(AgentPresence(user_id=user.id, tenant_id=tenant.id, status=AgentStatus.OFFLINE))
+        if db.scalar(select(QueueMember.id).where(QueueMember.queue_id == queue.id, QueueMember.user_id == user.id)) is None:
+            db.add(QueueMember(queue_id=queue.id, user_id=user.id))
+        if db.get(AgentPresence, user.id) is None:
+            db.add(AgentPresence(user_id=user.id, tenant_id=tenant.id, status=AgentStatus.OFFLINE))
+    chat_config = db.scalar(select(ChannelConfig).where(ChannelConfig.tenant_id == tenant.id, ChannelConfig.channel == Channel.WEB_CHAT))
+    if chat_config is None:
+        chat_config = ChannelConfig(tenant_id=tenant.id, channel=Channel.WEB_CHAT)
+        db.add(chat_config)
+    chat_config.enabled = True
+    chat_config.public_key_hash = hashlib.sha256(settings.seed_chat_widget_key.encode()).hexdigest()
+    chat_config.settings = {"queue_id": queue.id}
     db.commit()

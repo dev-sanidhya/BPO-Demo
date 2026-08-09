@@ -1,15 +1,18 @@
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import hashlib
+import secrets
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .database import Base, SessionLocal, engine, get_db
 from .dependencies import current_user, require_roles
-from .models import AgentPresence, AuditEvent, Conversation, ConversationStatus, QAAnswer, QAEvaluation, QAForm, QAQuestion, QAReview, Role, User
-from .schemas import AssignRequest, ConversationCreate, ConversationView, LoginRequest, PresenceUpdate, PresenceView, QAEvaluationCreate, QAFormCreate, QAReviewCreate, TokenResponse, UserView
-from .security import create_access_token, verify_password
+from .models import AgentPresence, AgentStatus, AuditEvent, Channel, ChannelConfig, ChatSession, Contact, Conversation, ConversationStatus, Message, QAAnswer, QAEvaluation, QAForm, QAQuestion, QAReview, QueueMember, Role, Tenant, User
+from .realtime import realtime_hub
+from .schemas import AssignRequest, ChatMessageCreate, ChatStartRequest, ConversationCreate, ConversationView, LoginRequest, PresenceUpdate, PresenceView, QAEvaluationCreate, QAFormCreate, QAReviewCreate, TokenResponse, UserView
+from .security import create_access_token, decode_access_token, verify_password
 from .seed import seed_demo
 
 
@@ -85,7 +88,7 @@ def create_conversation(payload: ConversationCreate, user: User = Depends(requir
 
 
 @app.post("/conversations/{conversation_id}/assign", response_model=ConversationView)
-def assign_conversation(conversation_id: str, payload: AssignRequest, user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR)), db: Session = Depends(get_db)) -> ConversationView:
+async def assign_conversation(conversation_id: str, payload: AssignRequest, user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR)), db: Session = Depends(get_db)) -> ConversationView:
     conversation = db.get(Conversation, conversation_id)
     assignee = db.get(User, payload.user_id)
     if conversation is None or conversation.tenant_id != user.tenant_id:
@@ -96,13 +99,152 @@ def assign_conversation(conversation_id: str, payload: AssignRequest, user: User
     conversation.status = ConversationStatus.ACTIVE
     presence = db.get(AgentPresence, assignee.id)
     if presence:
-        presence.status = "busy"
+        presence.status = AgentStatus.BUSY
         presence.current_conversation_id = conversation.id
         presence.changed_at = datetime.now(timezone.utc)
     audit(db, user, "conversation.assigned", "conversation", conversation.id, {"assigned_user_id": assignee.id})
     db.commit()
     db.refresh(conversation)
+    await realtime_hub.publish(user.tenant_id, {"type": "conversation.assigned", "conversation_id": conversation.id, "assigned_user_id": assignee.id}, assignee.id)
     return ConversationView.model_validate(conversation)
+
+
+@app.post("/conversations/{conversation_id}/claim", response_model=ConversationView)
+async def claim_conversation(conversation_id: str, user: User = Depends(require_roles(Role.AGENT)), db: Session = Depends(get_db)) -> ConversationView:
+    conversation = db.scalar(select(Conversation).where(Conversation.id == conversation_id).with_for_update())
+    if conversation is None or conversation.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if conversation.status != ConversationStatus.QUEUED or conversation.assigned_user_id is not None:
+        raise HTTPException(status_code=409, detail="Conversation is no longer available")
+    if conversation.queue_id and db.scalar(select(QueueMember.id).where(QueueMember.queue_id == conversation.queue_id, QueueMember.user_id == user.id)) is None:
+        raise HTTPException(status_code=403, detail="Agent is not a member of this queue")
+    conversation.assigned_user_id = user.id
+    conversation.status = ConversationStatus.ACTIVE
+    presence = db.get(AgentPresence, user.id)
+    if presence:
+        presence.status = AgentStatus.BUSY
+        presence.current_conversation_id = conversation.id
+        presence.changed_at = datetime.now(timezone.utc)
+    audit(db, user, "conversation.claimed", "conversation", conversation.id)
+    db.commit()
+    db.refresh(conversation)
+    await realtime_hub.publish(user.tenant_id, {"type": "conversation.claimed", "conversation_id": conversation.id, "assigned_user_id": user.id}, user.id)
+    return ConversationView.model_validate(conversation)
+
+
+def _message_view(message: Message) -> dict:
+    return {"id": message.id, "conversation_id": message.conversation_id, "sender_type": message.sender_type, "sender_user_id": message.sender_user_id, "content": message.content, "sequence": message.sequence, "created_at": message.created_at.isoformat()}
+
+
+def _authorized_conversation(db: Session, user: User, conversation_id: str) -> Conversation:
+    conversation = db.get(Conversation, conversation_id)
+    if conversation is None or conversation.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if user.role == Role.AGENT and conversation.assigned_user_id != user.id:
+        raise HTTPException(status_code=403, detail="Conversation is not assigned to this agent")
+    return conversation
+
+
+@app.get("/conversations/{conversation_id}/messages")
+def list_messages(conversation_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[dict]:
+    _authorized_conversation(db, user, conversation_id)
+    return [_message_view(message) for message in db.scalars(select(Message).where(Message.conversation_id == conversation_id).order_by(Message.sequence))]
+
+
+@app.post("/conversations/{conversation_id}/messages", status_code=201)
+async def send_agent_message(conversation_id: str, payload: ChatMessageCreate, user: User = Depends(require_roles(Role.AGENT, Role.SUPERVISOR, Role.ADMIN)), db: Session = Depends(get_db)) -> dict:
+    conversation = _authorized_conversation(db, user, conversation_id)
+    if conversation.channel != Channel.WEB_CHAT or conversation.status != ConversationStatus.ACTIVE:
+        raise HTTPException(status_code=409, detail="Conversation is not an active web chat")
+    sequence = (db.scalar(select(func.max(Message.sequence)).where(Message.conversation_id == conversation.id)) or 0) + 1
+    message = Message(conversation_id=conversation.id, sender_type="agent", sender_user_id=user.id, content=payload.content, sequence=sequence)
+    db.add(message)
+    audit(db, user, "chat.message_sent", "conversation", conversation.id, {"sequence": sequence})
+    db.commit()
+    db.refresh(message)
+    event = {"type": "chat.message", "conversation_id": conversation.id, "message": _message_view(message)}
+    await realtime_hub.publish(user.tenant_id, event, conversation.assigned_user_id)
+    return _message_view(message)
+
+
+def _valid_chat_session(db: Session, conversation_id: str, token: str) -> ChatSession:
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    session = db.scalar(select(ChatSession).where(ChatSession.conversation_id == conversation_id, ChatSession.token_hash == token_hash))
+    now = datetime.now(timezone.utc)
+    if session is None or session.expires_at.replace(tzinfo=timezone.utc) <= now:
+        raise HTTPException(status_code=401, detail="Invalid or expired chat session")
+    return session
+
+
+@app.post("/public/chat/start", status_code=201)
+async def start_public_chat(payload: ChatStartRequest, db: Session = Depends(get_db)) -> dict:
+    tenant = db.scalar(select(Tenant).where(Tenant.slug == payload.tenant_slug, Tenant.active.is_(True)))
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Chat widget not found")
+    config = db.scalar(select(ChannelConfig).where(ChannelConfig.tenant_id == tenant.id, ChannelConfig.channel == Channel.WEB_CHAT, ChannelConfig.enabled.is_(True)))
+    if config is None or not secrets.compare_digest(config.public_key_hash or "", hashlib.sha256(payload.widget_key.encode()).hexdigest()):
+        raise HTTPException(status_code=404, detail="Chat widget not found")
+    queue_id = config.settings.get("queue_id")
+    contact = Contact(tenant_id=tenant.id, name=payload.customer_name, email=str(payload.customer_email) if payload.customer_email else None, language=payload.language)
+    db.add(contact)
+    db.flush()
+    conversation = Conversation(tenant_id=tenant.id, queue_id=queue_id, contact_id=contact.id, channel=Channel.WEB_CHAT, status=ConversationStatus.QUEUED, direction="inbound", language=payload.language)
+    db.add(conversation)
+    db.flush()
+    message = Message(conversation_id=conversation.id, sender_type="customer", content=payload.initial_message, sequence=1)
+    session_token = secrets.token_urlsafe(32)
+    db.add(message)
+    db.add(ChatSession(tenant_id=tenant.id, conversation_id=conversation.id, token_hash=hashlib.sha256(session_token.encode()).hexdigest(), expires_at=datetime.now(timezone.utc) + timedelta(hours=24)))
+    db.commit()
+    await realtime_hub.publish(tenant.id, {"type": "conversation.queued", "conversation_id": conversation.id, "channel": "web_chat"})
+    return {"conversation_id": conversation.id, "session_token": session_token, "status": conversation.status.value}
+
+
+@app.get("/public/chat/{conversation_id}/messages")
+def list_customer_messages(conversation_id: str, x_chat_session: str = Header(alias="X-Chat-Session"), db: Session = Depends(get_db)) -> list[dict]:
+    _valid_chat_session(db, conversation_id, x_chat_session)
+    return [_message_view(message) for message in db.scalars(select(Message).where(Message.conversation_id == conversation_id).order_by(Message.sequence))]
+
+
+@app.post("/public/chat/{conversation_id}/messages", status_code=201)
+async def send_customer_message(conversation_id: str, payload: ChatMessageCreate, x_chat_session: str = Header(alias="X-Chat-Session"), db: Session = Depends(get_db)) -> dict:
+    session = _valid_chat_session(db, conversation_id, x_chat_session)
+    conversation = db.get(Conversation, conversation_id)
+    if conversation is None or conversation.status not in {ConversationStatus.QUEUED, ConversationStatus.ACTIVE}:
+        raise HTTPException(status_code=409, detail="Chat is closed")
+    sequence = (db.scalar(select(func.max(Message.sequence)).where(Message.conversation_id == conversation.id)) or 0) + 1
+    message = Message(conversation_id=conversation.id, sender_type="customer", content=payload.content, sequence=sequence)
+    db.add(message)
+    db.commit()
+    db.refresh(message)
+    event = {"type": "chat.message", "conversation_id": conversation.id, "message": _message_view(message)}
+    await realtime_hub.publish(session.tenant_id, event, conversation.assigned_user_id)
+    return _message_view(message)
+
+
+@app.websocket("/realtime")
+async def realtime_events(websocket: WebSocket) -> None:
+    protocols = [value.strip() for value in websocket.headers.get("sec-websocket-protocol", "").split(",")]
+    if len(protocols) != 2 or protocols[0] != "bpo-realtime":
+        await websocket.close(code=4401)
+        return
+    try:
+        payload = decode_access_token(protocols[1])
+        with SessionLocal() as db:
+            user = db.get(User, payload.get("sub"))
+            if user is None or not user.active or user.tenant_id != payload.get("tenant_id"):
+                raise ValueError("invalid user")
+            db.expunge(user)
+    except Exception:
+        await websocket.close(code=4401)
+        return
+    await websocket.accept(subprotocol="bpo-realtime")
+    await realtime_hub.connect(user, websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        await realtime_hub.disconnect(user.id, websocket)
 
 
 @app.get("/dashboard/summary")

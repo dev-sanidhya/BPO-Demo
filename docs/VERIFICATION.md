@@ -42,3 +42,11 @@ The foundation currently owns tenants, users/roles, campaigns, queues/membership
 - Expanded the API schema with versioned scripts, knowledge articles, QA forms/questions, automatic evaluations, evidence spans, immutable review history, recordings, actual/predicted satisfaction separation, cost events, and durable jobs.
 - Added API acceptance coverage requiring every QA form question to have exactly one answer and every answer to carry timestamped evidence.
 - Verified that a supervisor review changes the reviewed score while preserving the original automatic score. Result: **6 API tests passed**.
+
+## Realtime Isolation and Web Chat - 2026-08-09
+
+- Added authenticated WebSocket events using the `Sec-WebSocket-Protocol` header rather than URL credentials.
+- Added server-authorized routing: assigned agents receive their own events; authorized admin/supervisor/QA roles may observe; unrelated agents receive nothing.
+- Added an authenticated public widget handshake, expiring customer session, queue claim, bidirectional messages, and one ordered conversation timeline.
+- Automated result: **9 API tests passed**, including a direct negative assertion that agent 2 receives zero events for agent 1's assigned interaction.
+- Live PostgreSQL result: a Marathi-English chat was created as queued, claimed by an agent, answered, returned to the customer timeline, and persisted as an active `WEB_CHAT` conversation with the correct assignee and language.

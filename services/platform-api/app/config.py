@@ -13,12 +13,15 @@ class Settings(BaseSettings):
     seed_demo: bool = True
     seed_admin_email: str = "admin@pilot.example"
     seed_admin_password: str = "ChangeMe123!"
+    seed_chat_widget_key: str = "pilot-widget-key-change-me"
 
     def validate_runtime(self) -> None:
         if self.environment != "development" and self.jwt_secret == "development-only-change-me":
             raise RuntimeError("PLATFORM_JWT_SECRET must be set outside development")
         if self.environment != "development" and self.seed_admin_password == "ChangeMe123!":
             raise RuntimeError("PLATFORM_SEED_ADMIN_PASSWORD must be changed outside development")
+        if self.environment != "development" and self.seed_chat_widget_key == "pilot-widget-key-change-me":
+            raise RuntimeError("PLATFORM_SEED_CHAT_WIDGET_KEY must be changed outside development")
 
 
 @lru_cache

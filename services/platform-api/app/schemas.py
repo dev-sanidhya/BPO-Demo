@@ -108,3 +108,16 @@ class QAEvaluationCreate(BaseModel):
 class QAReviewCreate(BaseModel):
     reviewed_score: int = Field(ge=0, le=100)
     reason: str = Field(min_length=5, max_length=2000)
+
+
+class ChatStartRequest(BaseModel):
+    tenant_slug: str = Field(min_length=2, max_length=80)
+    widget_key: str = Field(min_length=8, max_length=200)
+    customer_name: str = Field(min_length=1, max_length=160)
+    customer_email: EmailStr | None = None
+    language: str = Field(default="en", max_length=20)
+    initial_message: str = Field(min_length=1, max_length=5000)
+
+
+class ChatMessageCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=5000)
