@@ -71,6 +71,11 @@ class AssignRequest(BaseModel):
     user_id: str
 
 
+class WrapUpRequest(BaseModel):
+    disposition: str = Field(min_length=2, max_length=120)
+    summary: str = Field(min_length=2, max_length=5000)
+
+
 class QAQuestionCreate(BaseModel):
     label: str = Field(min_length=3, max_length=300)
     guidance: str = ""

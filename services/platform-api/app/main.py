@@ -4,14 +4,16 @@ import hashlib
 import secrets
 
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from .config import get_settings
 from .database import Base, SessionLocal, engine, get_db
 from .dependencies import current_user, require_roles
 from .models import AgentPresence, AgentStatus, AuditEvent, Channel, ChannelConfig, ChatSession, Contact, Conversation, ConversationStatus, Message, QAAnswer, QAEvaluation, QAForm, QAQuestion, QAReview, QueueMember, Role, Tenant, User
 from .realtime import realtime_hub
-from .schemas import AssignRequest, ChatMessageCreate, ChatStartRequest, ConversationCreate, ConversationView, LoginRequest, PresenceUpdate, PresenceView, QAEvaluationCreate, QAFormCreate, QAReviewCreate, TokenResponse, UserView
+from .schemas import AssignRequest, ChatMessageCreate, ChatStartRequest, ConversationCreate, ConversationView, LoginRequest, PresenceUpdate, PresenceView, QAEvaluationCreate, QAFormCreate, QAReviewCreate, TokenResponse, UserView, WrapUpRequest
 from .security import create_access_token, decode_access_token, verify_password
 from .seed import seed_demo
 
@@ -29,6 +31,14 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Unified BPO AI Platform API", version="0.1.0", lifespan=lifespan)
+settings = get_settings()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Chat-Session"],
+)
 
 
 @app.get("/health")
@@ -74,6 +84,36 @@ def list_conversations(user: User = Depends(current_user), db: Session = Depends
         stmt = stmt.where(Conversation.assigned_user_id == user.id)
     stmt = stmt.order_by(Conversation.created_at.desc()).limit(100)
     return [ConversationView.model_validate(row) for row in db.scalars(stmt)]
+
+
+@app.get("/work/queued", response_model=list[ConversationView])
+def queued_work(user: User = Depends(require_roles(Role.AGENT)), db: Session = Depends(get_db)) -> list[ConversationView]:
+    queue_ids = select(QueueMember.queue_id).where(QueueMember.user_id == user.id)
+    stmt = select(Conversation).where(
+        Conversation.tenant_id == user.tenant_id,
+        Conversation.queue_id.in_(queue_ids),
+        Conversation.status == ConversationStatus.QUEUED,
+        Conversation.assigned_user_id.is_(None),
+    ).order_by(Conversation.created_at).limit(100)
+    return [ConversationView.model_validate(row) for row in db.scalars(stmt)]
+
+
+@app.get("/queues")
+def list_queues(user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[dict]:
+    from .models import WorkQueue
+    queues = db.scalars(select(WorkQueue).where(WorkQueue.tenant_id == user.tenant_id, WorkQueue.active.is_(True)).order_by(WorkQueue.name))
+    return [{"id": queue.id, "name": queue.name, "campaign_id": queue.campaign_id, "channels": queue.channels} for queue in queues]
+
+
+@app.get("/agents")
+def list_agents(user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR, Role.QA_REVIEWER)), db: Session = Depends(get_db)) -> list[dict]:
+    rows = db.execute(
+        select(User, AgentPresence)
+        .outerjoin(AgentPresence, AgentPresence.user_id == User.id)
+        .where(User.tenant_id == user.tenant_id, User.role == Role.AGENT, User.active.is_(True))
+        .order_by(User.display_name)
+    )
+    return [{"id": agent.id, "display_name": agent.display_name, "email": agent.email, "status": presence.status.value if presence else "offline", "current_conversation_id": presence.current_conversation_id if presence else None} for agent, presence in rows]
 
 
 @app.post("/conversations", response_model=ConversationView, status_code=201)
@@ -129,6 +169,28 @@ async def claim_conversation(conversation_id: str, user: User = Depends(require_
     db.commit()
     db.refresh(conversation)
     await realtime_hub.publish(user.tenant_id, {"type": "conversation.claimed", "conversation_id": conversation.id, "assigned_user_id": user.id}, user.id)
+    return ConversationView.model_validate(conversation)
+
+
+@app.post("/conversations/{conversation_id}/wrap-up", response_model=ConversationView)
+async def wrap_up_conversation(conversation_id: str, payload: WrapUpRequest, user: User = Depends(require_roles(Role.AGENT, Role.SUPERVISOR, Role.ADMIN)), db: Session = Depends(get_db)) -> ConversationView:
+    conversation = _authorized_conversation(db, user, conversation_id)
+    if conversation.status not in {ConversationStatus.ACTIVE, ConversationStatus.WRAP_UP}:
+        raise HTTPException(status_code=409, detail="Conversation is not available for wrap-up")
+    conversation.status = ConversationStatus.CLOSED
+    conversation.disposition = payload.disposition
+    conversation.summary = payload.summary
+    conversation.ended_at = datetime.now(timezone.utc)
+    if conversation.assigned_user_id:
+        presence = db.get(AgentPresence, conversation.assigned_user_id)
+        if presence:
+            presence.status = AgentStatus.WRAP_UP
+            presence.current_conversation_id = None
+            presence.changed_at = datetime.now(timezone.utc)
+    audit(db, user, "conversation.wrapped_up", "conversation", conversation.id, {"disposition": payload.disposition})
+    db.commit()
+    db.refresh(conversation)
+    await realtime_hub.publish(user.tenant_id, {"type": "conversation.closed", "conversation_id": conversation.id, "disposition": conversation.disposition}, conversation.assigned_user_id)
     return ConversationView.model_validate(conversation)
 
 
@@ -250,7 +312,11 @@ async def realtime_events(websocket: WebSocket) -> None:
 @app.get("/dashboard/summary")
 def dashboard_summary(user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR, Role.QA_REVIEWER, Role.CLIENT_VIEWER)), db: Session = Depends(get_db)) -> dict:
     counts = dict(db.execute(select(Conversation.status, func.count()).where(Conversation.tenant_id == user.tenant_id).group_by(Conversation.status)).all())
-    return {"conversations": {status.value: counts.get(status, 0) for status in ConversationStatus}}
+    presence_counts = dict(db.execute(select(AgentPresence.status, func.count()).where(AgentPresence.tenant_id == user.tenant_id).group_by(AgentPresence.status)).all())
+    return {
+        "conversations": {conversation_status.value: counts.get(conversation_status, 0) for conversation_status in ConversationStatus},
+        "agents": {agent_status.value: presence_counts.get(agent_status, 0) for agent_status in AgentStatus},
+    }
 
 
 @app.post("/qa/forms", status_code=201)

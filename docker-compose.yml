@@ -73,8 +73,9 @@ services:
       PLATFORM_SEED_ADMIN_EMAIL: ${PLATFORM_SEED_ADMIN_EMAIL:-admin@pilot.example}
       PLATFORM_SEED_ADMIN_PASSWORD: ${PLATFORM_SEED_ADMIN_PASSWORD}
       PLATFORM_SEED_CHAT_WIDGET_KEY: ${PLATFORM_SEED_CHAT_WIDGET_KEY:-pilot-widget-key-change-me}
+      PLATFORM_CORS_ORIGINS: ${PLATFORM_CORS_ORIGINS:-http://localhost:4173,http://localhost:5173,http://localhost:18081}
     ports:
-      - "${PLATFORM_API_PORT:-8000}:8000"
+      - "${PLATFORM_API_PORT:-18080}:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -83,6 +84,15 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
+
+  console:
+    build: ./apps/console
+    ports:
+      - "${PLATFORM_CONSOLE_PORT:-18081}:80"
+    depends_on:
+      platform-api:
+        condition: service_healthy
     restart: unless-stopped
 
   agent-ui:

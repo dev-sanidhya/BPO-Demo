@@ -134,3 +134,15 @@ def test_realtime_hub_never_broadcasts_assigned_event_to_other_agent() -> None:
     assert len(agent1_events) == 1
     assert agent2_events == []
     assert len(supervisor_events) == 1
+
+
+def test_agent_queue_claim_and_wrap_up_flow(client: TestClient, tokens: dict[str, str]) -> None:
+    started = client.post("/public/chat/start", json={"tenant_slug": "aperture-pilot", "widget_key": "pilot-widget-key-change-me", "customer_name": "Queue Customer", "initial_message": "Please help."})
+    conversation_id = started.json()["conversation_id"]
+    queued = client.get("/work/queued", headers=auth(tokens["agent1"]))
+    assert conversation_id in [row["id"] for row in queued.json()]
+    assert client.post(f"/conversations/{conversation_id}/claim", headers=auth(tokens["agent1"])).status_code == 200
+    wrapped = client.post(f"/conversations/{conversation_id}/wrap-up", headers=auth(tokens["agent1"]), json={"disposition": "resolved", "summary": "Customer question answered."})
+    assert wrapped.status_code == 200
+    assert wrapped.json()["status"] == "closed"
+    assert wrapped.json()["disposition"] == "resolved"

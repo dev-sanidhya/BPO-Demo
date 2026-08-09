@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     seed_admin_email: str = "admin@pilot.example"
     seed_admin_password: str = "ChangeMe123!"
     seed_chat_widget_key: str = "pilot-widget-key-change-me"
+    cors_origins: str = "http://localhost:4173,http://localhost:5173"
 
     def validate_runtime(self) -> None:
         if self.environment != "development" and self.jwt_secret == "development-only-change-me":

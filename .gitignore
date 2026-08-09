@@ -4,6 +4,10 @@ __pycache__/
 *.wav
 !asterisk/test-audio/*.wav
 node_modules/
+dist/
+release/
+artifacts/
+*.tsbuildinfo
 services/agent-ui/vendor/
 CLAUDE.md
 AGENTS.md
