@@ -7,6 +7,8 @@ import {
 } from "lucide-react";
 import { api, ApiError, connectRealtime } from "./api";
 import type { AgentRow, AssistEvent, ChatMessage, Conversation, QAEvaluation, TranscriptSegment, User, VoiceSession } from "./types";
+import { CallCapture } from "./callCapture";
+import { SipPhone, type SipStatus } from "./sip";
 
 const roleLabels: Record<string, string> = {
   admin: "Administrator", supervisor: "Floor supervisor", qa_reviewer: "Quality reviewer",
@@ -159,11 +161,21 @@ function AgentView({ token, user, assigned, queued, onRefresh }: { token: string
   const recordingRef = useRef<{ id: string; url: string } | null>(null);
   const [playhead, setPlayhead] = useState(0);
   const [draft, setDraft] = useState("");
-  const [phone, setPhone] = useState("+919999999999");
+  const [phone, setPhone] = useState(window.platformRuntime?.sip?.enabled ? "2003" : "+919999999999");
   const [callLanguage, setCallLanguage] = useState("en");
   const [presence, setPresence] = useState("available");
   const [error, setError] = useState("");
+  const [sipStatus, setSipStatus] = useState<SipStatus>("disabled");
+  const [sipDetail, setSipDetail] = useState("Demo media mode");
+  const sipRef = useRef<SipPhone | null>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const captureRef = useRef<CallCapture | null>(null);
+  const selectedIdRef = useRef<string | null>(selectedId);
+  const voiceRef = useRef<VoiceSession | null>(voice);
+  const endingRef = useRef(false);
   const selected = assigned.find((item) => item.id === selectedId);
+  selectedIdRef.current = selectedId;
+  voiceRef.current = voice;
 
   const loadConversation = useCallback(async () => {
     if (!selectedId || !selected) { setMessages([]); setTranscript([]); setAssist([]); setVoice(null); return; }
@@ -183,21 +195,76 @@ function AgentView({ token, user, assigned, queued, onRefresh }: { token: string
       }
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to load conversation"); }
   }, [selectedId, selected, token]);
+  const loadConversationRef = useRef(loadConversation);
+  loadConversationRef.current = loadConversation;
   useEffect(() => { void loadConversation(); }, [loadConversation]);
   useEffect(() => () => { if (recordingRef.current?.url) URL.revokeObjectURL(recordingRef.current.url); }, []);
+  useEffect(() => {
+    const phoneClient = new SipPhone({
+      onStatus: (status, detail) => { setSipStatus(status); setSipDetail(detail || status); },
+      onEnded: () => {
+        if (endingRef.current) { endingRef.current = false; return; }
+        const id = selectedIdRef.current;
+        if (!id || !voiceRef.current || voiceRef.current.state === "ended") return;
+        void (async () => {
+          try {
+            await stopCaptureAndUpload(id);
+            const next = await api.voiceControl(token, id, "hangup");
+            setVoice(next); await loadConversationRef.current(); onRefresh();
+          } catch (reason) { setError(reason instanceof Error ? reason.message : "Remote hang-up could not be finalized"); }
+        })();
+      },
+      onMedia: (remote, local) => {
+        if (remoteAudioRef.current) { remoteAudioRef.current.srcObject = remote; void remoteAudioRef.current.play().catch(() => undefined); }
+        if (voiceRef.current?.provider === "groq_external" && !captureRef.current) {
+          captureRef.current = new CallCapture(remote, local, async (blob, startMs) => {
+            const id = selectedIdRef.current;
+            if (!id) return;
+            await api.ingestVoiceChunk(token, id, blob, startMs);
+            await loadConversationRef.current();
+          });
+        }
+      },
+    });
+    sipRef.current = phoneClient;
+    phoneClient.start();
+    return () => { phoneClient.stop(); sipRef.current = null; };
+  // SIP is a workstation-lifetime service; changing interaction state is read through refs.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function claim(id: string) { await api.claim(token, id); setSelectedId(id); onRefresh(); }
   async function reject(id: string) { await api.rejectVoice(token, id); onRefresh(); }
   async function send(event: FormEvent) { event.preventDefault(); if (!selectedId || !draft.trim()) return; await api.sendMessage(token, selectedId, draft.trim()); setDraft(""); await loadConversation(); }
   async function changePresence(value: string) { setPresence(value); await api.presence(token, value); }
   async function resolve() { if (!selectedId) return; await api.wrapUp(token, selectedId, "resolved", selected?.summary || "Customer request resolved during the interaction."); setSelectedId(null); onRefresh(); }
-  async function dial(event: FormEvent) { event.preventDefault(); try { const result = await api.dialVoice(token, phone, "Deterministic pilot customer", callLanguage); setSelectedId(result.conversation.id); setVoice(result.session); onRefresh(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Call could not start"); } }
-  async function control(action: string, target?: string) { if (!selectedId) return; const next = await api.voiceControl(token, selectedId, action, target); setVoice(next); await loadConversation(); onRefresh(); }
+  async function stopCaptureAndUpload(id: string) {
+    const capture = captureRef.current;
+    captureRef.current = null;
+    if (!capture) return;
+    const result = await capture.stop();
+    if (result.blob.size) await api.uploadRecording(token, id, result.blob, result.durationMs);
+  }
+  async function dial(event: FormEvent) { event.preventDefault(); setError(""); try {
+    const sipEnabled = Boolean(window.platformRuntime?.sip?.enabled);
+    if (sipEnabled && sipStatus !== "registered") throw new Error(`SIP phone is not ready: ${sipDetail}`);
+    const result = await api.dialVoice(token, phone, sipEnabled ? "Live SIP customer" : "Pilot fixture customer", callLanguage);
+    setSelectedId(result.conversation.id); selectedIdRef.current = result.conversation.id; setVoice(result.session); voiceRef.current = result.session;
+    if (sipEnabled) sipRef.current?.call(phone);
+    onRefresh();
+  } catch (reason) { setError(reason instanceof Error ? reason.message : "Call could not start"); } }
+  async function control(action: string, target?: string) { if (!selectedId) return;
+    if (action === "mute" || action === "unmute") sipRef.current?.mute(action === "mute");
+    if (action === "hold" || action === "resume") sipRef.current?.hold(action === "hold");
+    if (action === "transfer" && target) sipRef.current?.transfer(target);
+    if (action === "hangup") { endingRef.current = Boolean(window.platformRuntime?.sip?.enabled); await stopCaptureAndUpload(selectedId); sipRef.current?.hangup(); }
+    const next = await api.voiceControl(token, selectedId, action, target); setVoice(next); voiceRef.current = next; await loadConversation(); onRefresh();
+  }
   const currentAssist = assist.find((item) => item.event_type === "next_best_action") || assist[0];
   const currentKnowledge = assist.find((item) => item.event_type === "knowledge");
 
   return <div className="agent-shell">
-    <header className="agent-topbar"><div><span className="section-kicker">AGENT WORKSPACE</span><h1>{user.display_name}</h1></div><label className="presence-control"><i className={presence} /><select aria-label="Agent status" value={presence} onChange={(e) => void changePresence(e.target.value)}><option value="available">Available</option><option value="break">On break</option><option value="offline">Offline</option></select></label></header>
+    <header className="agent-topbar"><div><span className="section-kicker">AGENT WORKSPACE</span><h1>{user.display_name}</h1></div><div className="agent-statuses"><span className={`sip-indicator ${sipStatus}`}><Phone size={14} /> {sipDetail}</span><label className="presence-control"><i className={presence} /><select aria-label="Agent status" value={presence} onChange={(e) => void changePresence(e.target.value)}><option value="available">Available</option><option value="break">On break</option><option value="offline">Offline</option></select></label></div></header>
     <div className="agent-columns">
       <section className="work-list"><div className="work-list-head"><div><h3>My work</h3><span>{activeWork.length} active</span></div><button aria-label="Refresh work" onClick={onRefresh}><Activity size={16} /></button></div>
         {activeWork.map((item) => <button key={item.id} onClick={() => setSelectedId(item.id)} className={`work-item ${selectedId === item.id ? "selected" : ""}`}><div className={`channel-badge ${item.channel}`}>{item.channel === "voice" ? <Phone size={16} /> : <MessageSquareText size={16} />}</div><div><strong>{item.channel === "web_chat" ? "Digital customer" : "Voice customer"}</strong><span>{item.language.toUpperCase()} · {formatTime(item.started_at)}</span></div><StatusPill status={item.status} /></button>)}
@@ -208,14 +275,15 @@ function AgentView({ token, user, assigned, queued, onRefresh }: { token: string
       <section className="conversation-panel">
         {selected ? <><div className="conversation-head"><div><div className={`channel-badge ${selected.channel}`}>{selected.channel === "voice" ? <Phone size={17} /> : <MessageSquareText size={17} />}</div><div><strong>{selected.channel === "voice" ? "Voice interaction" : "Customer conversation"}</strong><span>{selected.language.toUpperCase()} · {selected.channel === "voice" ? voice?.provider.replaceAll("_", " ") : "Secure session"}</span></div></div>{selected.channel === "web_chat" || voice?.state === "ended" ? <button className="resolve-button" onClick={() => void resolve()}><CheckCircle2 size={16} /> Complete wrap-up</button> : <StatusPill status={voice?.state || selected.status} />}</div>
           {selected.channel === "web_chat" ? <><div className="message-stream">{messages.map((message) => <div key={message.id} className={`message ${message.sender_type}`}><span>{message.sender_type === "agent" ? "You" : "Customer"}</span><p>{message.content}</p><time>{formatTime(message.created_at)}</time></div>)}</div><form onSubmit={send} className="composer"><input aria-label="Message customer" value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Write a clear, helpful response…" /><button aria-label="Send message"><Send size={18} /></button></form></> : <div className="voice-stage">
-            <div className={`call-orb ${voice?.state || "active"}`}><PhoneCall size={34} /><strong>{voice?.state === "ended" ? "Call complete" : voice?.held ? "On hold" : "Connected"}</strong><span>{selected.language.toUpperCase()} · deterministic local trunk</span></div>
-            {voice?.state !== "ended" && <div className="call-controls"><button aria-label={voice?.muted ? "Unmute" : "Mute"} onClick={() => void control(voice?.muted ? "unmute" : "mute")}><MicOff size={18} /><span>{voice?.muted ? "Unmute" : "Mute"}</span></button><button aria-label={voice?.held ? "Resume" : "Hold"} onClick={() => void control(voice?.held ? "resume" : "hold")}>{voice?.held ? <Play size={18} /> : <Pause size={18} />}<span>{voice?.held ? "Resume" : "Hold"}</span></button><button aria-label="Transfer" onClick={() => void control("transfer", "supervisor-desk")}><UsersRound size={18} /><span>Transfer</span></button><button className="hangup" aria-label="Hang up" onClick={() => void control("hangup")}><PhoneOff size={18} /><span>Hang up</span></button></div>}
+            <audio ref={remoteAudioRef} autoPlay className="remote-call-audio" />
+            <div className={`call-orb ${voice?.state || "active"}`}><PhoneCall size={34} /><strong>{voice?.state === "ended" ? "Call complete" : voice?.held ? "On hold" : sipStatus === "calling" ? "Calling" : "Connected"}</strong><span>{selected.language.toUpperCase()} · {window.platformRuntime?.sip?.enabled ? "live Asterisk WebRTC" : voice?.provider.replaceAll("_", " ")}</span></div>
+            {voice?.state !== "ended" && <div className="call-controls"><button aria-label={voice?.muted ? "Unmute" : "Mute"} onClick={() => void control(voice?.muted ? "unmute" : "mute")}><MicOff size={18} /><span>{voice?.muted ? "Unmute" : "Mute"}</span></button><button aria-label={voice?.held ? "Resume" : "Hold"} onClick={() => void control(voice?.held ? "resume" : "hold")}>{voice?.held ? <Play size={18} /> : <Pause size={18} />}<span>{voice?.held ? "Resume" : "Hold"}</span></button><button aria-label="Transfer" onClick={() => void control("transfer", "1002")}><UsersRound size={18} /><span>Transfer</span></button><button className="hangup" aria-label="Hang up" onClick={() => void control("hangup")}><PhoneOff size={18} /><span>Hang up</span></button></div>}
             {!!transcript.length && <div className="transcript-panel"><div className="transcript-head"><div><span className="section-kicker">SYNCHRONIZED TRANSCRIPT</span><strong>Speaker-aware conversation</strong></div>{recordingUrl && <audio aria-label="Call recording" controls src={recordingUrl} onTimeUpdate={(event) => setPlayhead(event.currentTarget.currentTime * 1000)} />}</div>{transcript.map((segment) => <button key={segment.id} className={`transcript-row ${playhead >= segment.start_ms && playhead <= segment.end_ms ? "playing" : ""}`}><span>{segment.speaker}</span><p>{segment.text}</p><time>{Math.floor(segment.start_ms / 60000)}:{String(Math.floor(segment.start_ms / 1000) % 60).padStart(2, "0")}</time></button>)}</div>}
           </div>}
           {error && <div className="inline-error">{error}</div>}
-        </> : <div className="no-conversation dial-state"><div><PhoneCall size={34} /></div><h2>Start a voice interaction</h2><p>Use the synchronized English test trunk or accept work from the shared queue. Digital channels support English, Hindi, Marathi, and Hinglish.</p><form onSubmit={dial} className="dial-form"><input aria-label="Customer phone" value={phone} onChange={(event) => setPhone(event.target.value)} /><select aria-label="Call language" value={callLanguage} onChange={(event) => setCallLanguage(event.target.value)}><option value="en">English · synchronized fixture</option></select><button aria-label="Start call"><PhoneCall size={18} /> Start call</button></form></div>}
+        </> : <div className="no-conversation dial-state"><div><PhoneCall size={34} /></div><h2>Start a voice interaction</h2><p>{window.platformRuntime?.sip?.enabled ? "Dial extension 2003 for a real two-party WebRTC proof with customer endpoint 1003." : "Run repeatable synchronized call fixtures in English, Hindi, Marathi, or Hinglish."}</p><form onSubmit={dial} className="dial-form"><input aria-label="Customer phone" value={phone} onChange={(event) => setPhone(event.target.value)} /><select aria-label="Call language" value={callLanguage} onChange={(event) => setCallLanguage(event.target.value)}><option value="en">English</option><option value="hi">हिन्दी</option><option value="mr">मराठी · review required</option><option value="hi-en">Hinglish</option><option value="auto">Auto detect · uploaded/live audio</option></select><button aria-label="Start call"><PhoneCall size={18} /> {window.platformRuntime?.sip?.enabled ? "Call extension" : "Start fixture"}</button></form></div>}
       </section>
-      <aside className="assist-panel"><div className="assist-title"><div><Sparkles size={17} /></div><span>LIVE ASSIST</span><i /></div><div className="assist-card primary"><span>{currentAssist?.event_type.replaceAll("_", " ").toUpperCase() || "NEXT BEST ACTION"}</span><strong>{currentAssist?.content || (selected ? "Listen actively and follow the configured campaign steps." : "Guidance appears when an interaction is active.")}</strong><small>{currentAssist?.title || "Campaign playbook"} · local rules</small></div><div className="checklist"><div className="checklist-head"><span>Required steps</span><b>{transcript.length ? "3 / 3" : "0 / 3"}</b></div>{["Confirm customer identity", "Acknowledge the issue", "Recap the resolution"].map((step) => <label className={transcript.length ? "done" : ""} key={step}><i />{step}</label>)}</div><div className="knowledge-card"><BookOpen size={17} /><div><span>KNOWLEDGE</span><strong>{currentKnowledge?.content || "Contextual policy guidance appears here."}</strong></div></div><div className="privacy-note"><ShieldCheck size={15} /> Processing mode: <b>Local</b></div></aside>
+      <aside className="assist-panel"><div className="assist-title"><div><Sparkles size={17} /></div><span>LIVE ASSIST</span><i /></div><div className="assist-card primary"><span>{currentAssist?.event_type.replaceAll("_", " ").toUpperCase() || "NEXT BEST ACTION"}</span><strong>{currentAssist?.content || (selected ? "Listen actively and follow the configured campaign steps." : "Guidance appears when an interaction is active.")}</strong><small>{currentAssist?.title || "Campaign playbook"} · {String(currentAssist?.metadata?.source || "local rules").replaceAll("_", " ")}</small></div><div className="checklist"><div className="checklist-head"><span>Required steps</span><b>{transcript.length ? "3 / 3" : "0 / 3"}</b></div>{["Confirm customer identity", "Acknowledge the issue", "Recap the resolution"].map((step) => <label className={transcript.length ? "done" : ""} key={step}><i />{step}</label>)}</div><div className="knowledge-card"><BookOpen size={17} /><div><span>KNOWLEDGE</span><strong>{currentKnowledge?.content || "Contextual policy guidance appears here."}</strong></div></div><div className="privacy-note"><ShieldCheck size={15} /> Processing mode: <b>{voice?.provider === "groq_external" ? "External Groq" : "Strict local"}</b></div></aside>
     </div>
   </div>;
 }

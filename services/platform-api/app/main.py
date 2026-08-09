@@ -5,14 +5,17 @@ import hashlib
 import io
 from pathlib import Path
 import secrets
+import shutil
+import wave
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Response, WebSocket, WebSocketDisconnect, status
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Response, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .config import get_settings
+from .ai import GroqAI, estimate_asr_cost_micros_inr, estimate_llm_cost_micros_inr, retrieve_knowledge
 from .database import Base, SessionLocal, engine, get_db
 from .dependencies import current_user, require_roles
 from .jobs import complete_job, record_failure, start_voice_finalization
@@ -252,7 +255,9 @@ async def dial_voice(payload: VoiceDialRequest, user: User = Depends(require_rol
     conversation = Conversation(tenant_id=user.tenant_id, campaign_id=queue.campaign_id, queue_id=queue.id, contact_id=contact.id, assigned_user_id=user.id, channel=Channel.VOICE, status=ConversationStatus.ACTIVE, direction="outbound", language=payload.language)
     db.add(conversation)
     db.flush()
-    session = VoiceSession(conversation_id=conversation.id, tenant_id=user.tenant_id, provider_call_id=f"local-{conversation.id}")
+    tenant = db.get(Tenant, user.tenant_id)
+    provider = "groq_external" if tenant and tenant.ai_mode == "external" else "deterministic_local"
+    session = VoiceSession(conversation_id=conversation.id, tenant_id=user.tenant_id, provider=provider, provider_call_id=f"{provider}-{conversation.id}")
     db.add(session)
     db.add(AssistEvent(tenant_id=user.tenant_id, conversation_id=conversation.id, event_type="script", title="Opening", content="Greet the customer and state your name before discussing the order.", metadata_json={"source": "Customer Care Core v1"}))
     presence = db.get(AgentPresence, user.id)
@@ -264,6 +269,115 @@ async def dial_voice(payload: VoiceDialRequest, user: User = Depends(require_rol
     db.commit()
     await realtime_hub.publish(user.tenant_id, {"type": "voice.started", "conversation_id": conversation.id}, user.id)
     return {"conversation": ConversationView.model_validate(conversation), "session": _voice_view(session)}
+
+
+@app.put("/voice/calls/{conversation_id}/recording")
+def upload_voice_recording(
+    conversation_id: str,
+    recording_file: UploadFile = File(alias="file"),
+    duration_ms: int | None = Form(default=None, ge=1),
+    user: User = Depends(require_roles(Role.AGENT)),
+    db: Session = Depends(get_db),
+) -> dict:
+    conversation = _authorized_conversation(db, user, conversation_id)
+    session = db.get(VoiceSession, conversation.id)
+    if conversation.channel != Channel.VOICE or session is None or session.state not in {"active", "held"}:
+        raise HTTPException(status_code=409, detail="A recording can only be attached to an active voice call")
+    if db.scalar(select(Recording.id).where(Recording.conversation_id == conversation.id)):
+        raise HTTPException(status_code=409, detail="This call already has a recording")
+    suffix = Path(recording_file.filename or "").suffix.lower()
+    if suffix not in {".wav", ".webm", ".ogg", ".mp3", ".m4a"}:
+        raise HTTPException(status_code=415, detail="Recording must be WAV, WebM, OGG, MP3, or M4A")
+    destination = Path(settings.recording_dir) / f"{conversation.id}{suffix}"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("wb") as output:
+        shutil.copyfileobj(recording_file.file, output)
+    channels = 1
+    if suffix == ".wav":
+        try:
+            with wave.open(str(destination), "rb") as audio:
+                duration_ms = round(audio.getnframes() / audio.getframerate() * 1000)
+                channels = audio.getnchannels()
+        except (wave.Error, EOFError) as error:
+            destination.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail="The uploaded file is not a readable WAV recording") from error
+    elif duration_ms is None:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="duration_ms is required for compressed browser recordings")
+    digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+    mime_type = recording_file.content_type or {".webm": "audio/webm", ".ogg": "audio/ogg", ".mp3": "audio/mpeg", ".m4a": "audio/mp4"}.get(suffix, "audio/wav")
+    db.add(Recording(tenant_id=user.tenant_id, conversation_id=conversation.id, storage_key=str(destination), mime_type=mime_type, duration_ms=duration_ms, sha256=digest, channels=channels))
+    audit(db, user, "voice.recording_attached", "conversation", conversation.id, {"duration_ms": duration_ms, "channels": channels, "sha256": digest})
+    db.commit()
+    return {"conversation_id": conversation.id, "duration_ms": duration_ms, "channels": channels, "sha256": digest, "mime_type": mime_type}
+
+
+@app.post("/voice/calls/{conversation_id}/audio-chunks", status_code=201)
+async def ingest_voice_chunk(
+    conversation_id: str,
+    audio_file: UploadFile = File(alias="file"),
+    speaker: str = Form(pattern="^(agent|customer|unknown)$"),
+    start_ms: int = Form(ge=0),
+    user: User = Depends(require_roles(Role.AGENT)),
+    db: Session = Depends(get_db),
+) -> dict:
+    conversation = _authorized_conversation(db, user, conversation_id)
+    tenant = db.get(Tenant, user.tenant_id)
+    session = db.get(VoiceSession, conversation.id)
+    if tenant is None or tenant.ai_mode != "external":
+        raise HTTPException(status_code=409, detail="Near-real-time cloud guidance requires external AI mode")
+    if conversation.channel != Channel.VOICE or session is None or session.state not in {"active", "held"}:
+        raise HTTPException(status_code=409, detail="Audio chunks require an active voice call")
+    if not (audio_file.filename or "").lower().endswith((".wav", ".webm", ".ogg", ".mp3", ".m4a")):
+        raise HTTPException(status_code=415, detail="Unsupported audio chunk format")
+    suffix = Path(audio_file.filename or "chunk.webm").suffix.lower()
+    chunk_dir = Path(settings.recording_dir) / ".chunks"
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    chunk_path = chunk_dir / f"{conversation.id}-{secrets.token_hex(8)}{suffix}"
+    try:
+        with chunk_path.open("wb") as output:
+            shutil.copyfileobj(audio_file.file, output)
+        provider = GroqAI(settings)
+        result = provider.transcribe(str(chunk_path), settings.groq_realtime_asr_model, conversation.language)
+    finally:
+        chunk_path.unlink(missing_ok=True)
+    created_segments: list[dict] = []
+    for item in result.segments:
+        row = TranscriptSegment(
+            tenant_id=user.tenant_id,
+            conversation_id=conversation.id,
+            speaker=speaker,
+            text=item["text"],
+            start_ms=start_ms + item["start_ms"],
+            end_ms=start_ms + item["end_ms"],
+            language=conversation.language if conversation.language != "auto" else result.language,
+            confidence=max(1, min(round(100 + item["avg_logprob"] * 20 - item["no_speech_prob"] * 40), 99)),
+        )
+        db.add(row)
+        db.flush()
+        created_segments.append({"id": row.id, "speaker": row.speaker, "text": row.text, "start_ms": row.start_ms, "end_ms": row.end_ms, "language": row.language, "confidence": row.confidence})
+    all_rows = list(db.scalars(select(TranscriptSegment).where(TranscriptSegment.conversation_id == conversation.id).order_by(TranscriptSegment.start_ms)))
+    transcript = [{"speaker": row.speaker, "text": row.text, "start_ms": row.start_ms, "end_ms": row.end_ms} for row in all_rows]
+    script = db.scalar(select(Script).where(Script.tenant_id == user.tenant_id, Script.active.is_(True)).order_by(Script.version.desc()))
+    articles = list(db.scalars(select(KnowledgeArticle).where(KnowledgeArticle.tenant_id == user.tenant_id, KnowledgeArticle.active.is_(True))))
+    article_payload = [{"title": item.title, "content": item.content, "tags": item.tags} for item in articles]
+    retrieved = retrieve_knowledge(" ".join(row["text"] for row in transcript), article_payload)
+    analysis = provider.analyze(transcript, [], script.content if script else "Use professional customer-service practices.", retrieved, conversation.language, live=True)
+    assists: list[dict] = []
+    for item in analysis.payload["assists"][:3]:
+        index = max(0, min(int(item["evidence_segment_index"]), len(transcript) - 1))
+        evidence = transcript[index]
+        event = AssistEvent(tenant_id=user.tenant_id, conversation_id=conversation.id, event_type=item["event_type"], title=item["title"][:160], content=item["content"], evidence_start_ms=evidence["start_ms"], evidence_end_ms=evidence["end_ms"], metadata_json={"source": "groq_live", "model": settings.groq_guidance_model, "request_id": analysis.request_id, "retrieved_articles": [article["title"] for article in retrieved]})
+        db.add(event)
+        db.flush()
+        assists.append({"id": event.id, "event_type": event.event_type, "title": event.title, "content": event.content, "evidence_start_ms": event.evidence_start_ms, "evidence_end_ms": event.evidence_end_ms, "metadata": event.metadata_json})
+    db.add(CostEvent(tenant_id=user.tenant_id, conversation_id=conversation.id, category="transcription", provider=settings.groq_realtime_asr_model, units=max(round(result.duration_seconds), 1), unit_name="audio_seconds", cost_micros_inr=estimate_asr_cost_micros_inr(settings.groq_realtime_asr_model, result.duration_seconds, settings.usd_to_inr)))
+    usage_tokens = analysis.usage.input_tokens + analysis.usage.output_tokens
+    db.add(CostEvent(tenant_id=user.tenant_id, conversation_id=conversation.id, category="inference", provider=settings.groq_guidance_model, units=usage_tokens, unit_name="tokens", cost_micros_inr=estimate_llm_cost_micros_inr(settings.groq_guidance_model, analysis.usage, settings.usd_to_inr)))
+    audit(db, user, "voice.chunk_analyzed", "conversation", conversation.id, {"speaker": speaker, "start_ms": start_ms, "segments": len(created_segments), "asr_request_id": result.request_id, "analysis_request_id": analysis.request_id})
+    db.commit()
+    await realtime_hub.publish(user.tenant_id, {"type": "assist.generated", "conversation_id": conversation.id, "assists": assists}, user.id)
+    return {"segments": created_segments, "assists": assists, "detected_language": analysis.payload["detected_language"]}
 
 
 @app.post("/voice/calls/simulate-inbound", status_code=201)
@@ -381,7 +495,7 @@ def conversation_recording(conversation_id: str, user: User = Depends(current_us
     recording = db.scalar(select(Recording).where(Recording.conversation_id == conversation_id))
     if recording is None or not Path(recording.storage_key).is_file():
         raise HTTPException(status_code=404, detail="Recording not found")
-    return FileResponse(recording.storage_key, media_type=recording.mime_type, filename=f"{conversation_id}.wav", headers={"Accept-Ranges": "bytes"})
+    return FileResponse(recording.storage_key, media_type=recording.mime_type, filename=f"{conversation_id}{Path(recording.storage_key).suffix}", headers={"Accept-Ranges": "bytes"})
 
 
 @app.get("/conversations/{conversation_id}/messages")
@@ -685,6 +799,8 @@ def create_user(payload: UserCreate, user: User = Depends(require_roles(Role.ADM
 @app.put("/configuration/privacy")
 def update_privacy(payload: PrivacyModeUpdate, user: User = Depends(require_roles(Role.ADMIN)), db: Session = Depends(get_db)) -> dict:
     tenant = db.get(Tenant, user.tenant_id)
+    if payload.ai_mode == "external" and not settings.groq_api_key:
+        raise HTTPException(status_code=409, detail="External AI is not ready: GROQ_API_KEY is not configured on the platform server")
     tenant.ai_mode = payload.ai_mode
     audit(db, user, "privacy.mode_changed", "tenant", tenant.id, {"ai_mode": payload.ai_mode})
     db.commit()
@@ -700,7 +816,9 @@ def diagnostics(user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR))
     recording_bytes = sum(item.stat().st_size for item in recording_dir.glob("*.wav")) if recording_dir.exists() else 0
     channels = db.scalars(select(ChannelConfig).where(ChannelConfig.tenant_id == user.tenant_id))
     jobs = dict(db.execute(select(DurableJob.status, func.count()).where(DurableJob.tenant_id == user.tenant_id).group_by(DurableJob.status)).all())
-    return {"status": "ok", "database": "connected", "privacy": {"mode": tenant.ai_mode, "customer_content_egress": tenant.ai_mode != "local", "provider": "local_rules" if tenant.ai_mode == "local" else "external_config_required"}, "queue": {"oldest_wait_seconds": lag}, "jobs": {status.value: count for status, count in jobs.items()}, "storage": {"recording_bytes": recording_bytes, "path": settings.recording_dir}, "channels": {item.channel.value: {"enabled": item.enabled, "provider": item.settings.get("provider", "internal")} for item in channels}}
+    external_ready = bool(settings.groq_api_key)
+    provider = "local_rules" if tenant.ai_mode == "local" else ("groq" if external_ready else "external_config_required")
+    return {"status": "ok", "database": "connected", "privacy": {"mode": tenant.ai_mode, "customer_content_egress": tenant.ai_mode != "local", "provider": provider, "external_ready": external_ready, "data_retention": "Groq project policy; enable Zero Data Retention before client data" if tenant.ai_mode == "external" else "deployment-local"}, "ai": {"realtime_asr_model": settings.groq_realtime_asr_model if external_ready else None, "final_asr_model": settings.groq_final_asr_model if external_ready else None, "guidance_model": settings.groq_guidance_model if external_ready else None, "qa_model": settings.groq_qa_model if external_ready else None, "cost_fx_usd_to_inr": settings.usd_to_inr}, "queue": {"oldest_wait_seconds": lag}, "jobs": {status.value: count for status, count in jobs.items()}, "storage": {"recording_bytes": recording_bytes, "path": settings.recording_dir}, "channels": {item.channel.value: {"enabled": item.enabled, "provider": item.settings.get("provider", "internal")} for item in channels}}
 
 
 def _report_conversations(db: Session, user: User, channel: Channel | None, campaign_id: str | None, queue_id: str | None, agent_id: str | None) -> list[Conversation]:

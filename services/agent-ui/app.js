@@ -82,11 +82,14 @@ function initSip() {
     callBtn.disabled = true;
     hangupBtn.disabled = false;
 
-    session.connection.addEventListener("track", (event) => {
-      remoteAudioEl.srcObject = event.streams[0];
-    });
+    const bindPeerConnection = () => session.connection?.addEventListener("track", (event) => {
+      remoteAudioEl.srcObject = event.streams[0] || new MediaStream([event.track]);
+    }, { once: true });
+    if (session.connection) bindPeerConnection();
+    else session.on("peerconnection", bindPeerConnection);
 
     session.on("ended", resetCallUI);
+    session.on("confirmed", () => setSipStatus("two-party media", "connected"));
     // Previously this called resetCallUI() directly on failure too, which
     // silently reset the status back to "registered as X" — indistinguishable
     // from a call that never happened at all. Showing the actual cause here
@@ -198,4 +201,5 @@ function escapeHtml(str) {
 }
 
 initSip();
-connectRealtimeAssist();
+if (params.get("assist") === "0") setWsStatus("disabled for SIP test endpoint", "");
+else connectRealtimeAssist();

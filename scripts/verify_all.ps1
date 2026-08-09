@@ -19,6 +19,10 @@ try {
     docker compose up -d
     if ($LASTEXITCODE -ne 0) { throw "Default stack startup failed" }
 
+    $env:AGENT_UI_PORT = if ($env:AGENT_UI_PORT) { $env:AGENT_UI_PORT } else { "18082" }
+    docker compose --profile legacy-ui up -d --build agent-ui
+    if ($LASTEXITCODE -ne 0) { throw "Carrier-free SIP endpoint startup failed" }
+
     $health = Invoke-RestMethod http://127.0.0.1:18080/health
     if ($health.status -ne "ok") { throw "API health check failed" }
 
@@ -30,6 +34,8 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "Web E2E failed" }
         npm run test:e2e:electron
         if ($LASTEXITCODE -ne 0) { throw "Electron E2E failed" }
+        npm run test:e2e:sip
+        if ($LASTEXITCODE -ne 0) { throw "Carrier-free SIP E2E failed" }
         if ($IncludePackage) {
             npm run electron:dist:win
             if ($LASTEXITCODE -ne 0) { throw "Windows packaging failed" }

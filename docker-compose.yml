@@ -22,6 +22,14 @@ services:
       - "8088:8088"
       - "8089:8089"
       - "10000-10099:10000-10099/udp"
+    volumes:
+      - ./asterisk/conf/pjsip.conf:/etc/asterisk/pjsip.conf:ro
+      - ./asterisk/conf/extensions.conf:/etc/asterisk/extensions.conf:ro
+      - ./asterisk/conf/ari.conf:/etc/asterisk/ari.conf:ro
+      - ./asterisk/conf/http.conf:/etc/asterisk/http.conf:ro
+      - ./asterisk/conf/rtp.conf:/etc/asterisk/rtp.conf:ro
+      - ./asterisk/conf/logger.conf:/etc/asterisk/logger.conf:ro
+      - ./asterisk/test-audio/real-call-sample.wav:/var/lib/asterisk/sounds/en/real-call-sample.wav:ro
     restart: unless-stopped
 
   qa-scoring:
@@ -79,6 +87,12 @@ services:
       PLATFORM_RECORDING_DIR: /data/recordings
       PLATFORM_VOICE_FIXTURE_PATH: /fixtures/deterministic-pilot.wav
       PLATFORM_VOICE_FIXTURE_MANIFEST_PATH: /fixtures/deterministic-pilot.json
+      PLATFORM_GROQ_API_KEY: ${GROQ_API_KEY:-}
+      PLATFORM_GROQ_REALTIME_ASR_MODEL: ${GROQ_REALTIME_ASR_MODEL:-whisper-large-v3}
+      PLATFORM_GROQ_FINAL_ASR_MODEL: ${GROQ_FINAL_ASR_MODEL:-whisper-large-v3}
+      PLATFORM_GROQ_GUIDANCE_MODEL: ${GROQ_GUIDANCE_MODEL:-openai/gpt-oss-20b}
+      PLATFORM_GROQ_QA_MODEL: ${GROQ_QA_MODEL:-openai/gpt-oss-20b}
+      PLATFORM_USD_TO_INR: ${USD_TO_INR:-84}
     ports:
       - "${PLATFORM_API_PORT:-18080}:8000"
     depends_on:
@@ -86,8 +100,7 @@ services:
         condition: service_healthy
     volumes:
       - recording-data:/data/recordings
-      - ./asterisk/test-audio/deterministic-pilot.wav:/fixtures/deterministic-pilot.wav:ro
-      - ./asterisk/test-audio/deterministic-pilot.json:/fixtures/deterministic-pilot.json:ro
+      - ./asterisk/test-audio:/fixtures:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
@@ -108,13 +121,18 @@ services:
       PLATFORM_RECORDING_DIR: /data/recordings
       PLATFORM_VOICE_FIXTURE_PATH: /fixtures/deterministic-pilot.wav
       PLATFORM_VOICE_FIXTURE_MANIFEST_PATH: /fixtures/deterministic-pilot.json
+      PLATFORM_GROQ_API_KEY: ${GROQ_API_KEY:-}
+      PLATFORM_GROQ_REALTIME_ASR_MODEL: ${GROQ_REALTIME_ASR_MODEL:-whisper-large-v3}
+      PLATFORM_GROQ_FINAL_ASR_MODEL: ${GROQ_FINAL_ASR_MODEL:-whisper-large-v3}
+      PLATFORM_GROQ_GUIDANCE_MODEL: ${GROQ_GUIDANCE_MODEL:-openai/gpt-oss-20b}
+      PLATFORM_GROQ_QA_MODEL: ${GROQ_QA_MODEL:-openai/gpt-oss-20b}
+      PLATFORM_USD_TO_INR: ${USD_TO_INR:-84}
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
       - recording-data:/data/recordings
-      - ./asterisk/test-audio/deterministic-pilot.wav:/fixtures/deterministic-pilot.wav:ro
-      - ./asterisk/test-audio/deterministic-pilot.json:/fixtures/deterministic-pilot.json:ro
+      - ./asterisk/test-audio:/fixtures:ro
     restart: unless-stopped
 
   console:
@@ -132,8 +150,8 @@ services:
     ports:
       - "${AGENT_UI_PORT}:80"
     depends_on:
-      - realtime-assist
-      - platform-api
+      asterisk:
+        condition: service_started
     restart: unless-stopped
 
   metabase:

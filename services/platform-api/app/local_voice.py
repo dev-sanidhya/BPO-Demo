@@ -50,12 +50,23 @@ TRANSCRIPTS: dict[str, list[tuple[str, str, int, int]]] = {
 }
 
 
-def _write_recording(conversation_id: str) -> tuple[str, int, str, int]:
+def voice_fixture_paths(language: str) -> tuple[Path, Path]:
+    settings = get_settings()
+    if language in {"hi", "mr", "hi-en"}:
+        fixture_dir = Path(settings.voice_fixture_path).parent
+        audio = fixture_dir / f"synthetic-support-{language}.wav"
+        manifest = fixture_dir / f"synthetic-support-{language}.json"
+        if audio.is_file() and manifest.is_file():
+            return audio, manifest
+    return Path(settings.voice_fixture_path), Path(settings.voice_fixture_manifest_path)
+
+
+def _write_recording(conversation_id: str, language: str) -> tuple[str, int, str, int]:
     settings = get_settings()
     output_dir = Path(settings.recording_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     destination = output_dir / f"{conversation_id}.wav"
-    fixture = Path(settings.voice_fixture_path)
+    fixture, _ = voice_fixture_paths(language)
     if fixture.exists():
         shutil.copyfile(fixture, destination)
     else:
@@ -75,14 +86,14 @@ def finalize_local_voice(db: Session, conversation: Conversation) -> None:
     if db.scalar(select(Recording).where(Recording.conversation_id == conversation.id)):
         return
 
-    storage_key, duration_ms, digest, channels = _write_recording(conversation.id)
+    storage_key, duration_ms, digest, channels = _write_recording(conversation.id, conversation.language)
     db.add(Recording(tenant_id=conversation.tenant_id, conversation_id=conversation.id, storage_key=storage_key, duration_ms=duration_ms, sha256=digest, channels=channels))
 
     language = conversation.language if conversation.language in TRANSCRIPTS else "en"
     transcript = TRANSCRIPTS[language]
     confidence = 96
-    manifest = Path(get_settings().voice_fixture_manifest_path)
-    if language == "en" and manifest.exists():
+    _, manifest = voice_fixture_paths(language)
+    if manifest.exists():
         source_segments = json.loads(manifest.read_text(encoding="utf-8"))["segments"]
         transcript = [(item["speaker"], item["text"], item["start_ms"], item["end_ms"]) for item in source_segments]
         confidence = 100

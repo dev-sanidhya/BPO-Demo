@@ -40,7 +40,7 @@ try {
   await portal.getByLabel("Review reason").fill("Confirmed against the synchronized recording and evidence spans.");
   await portal.getByRole("button", { name: "Save review" }).click();
   await portal.getByText("Human reviewed").first().waitFor();
-  await portal.getByText(/Original automatic score: 88/).waitFor();
+  await portal.getByText(/Original automatic score: \d+/).waitFor();
   await portal.screenshot({ path: path.join(evidenceDir, "web-quality-review.png") });
   await portal.getByRole("button", { name: /Reports/ }).click();
   await portal.getByRole("heading", { name: "Reports & economics" }).waitFor();

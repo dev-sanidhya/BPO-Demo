@@ -1,0 +1,42 @@
+{
+  "source": "synthetic_edge_tts",
+  "language": "hi-en",
+  "segments": [
+    {
+      "speaker": "agent",
+      "text": "Thank you for calling. मैं मीरा बोल रही हूँ. How may I help you?",
+      "start_ms": 0,
+      "end_ms": 7368
+    },
+    {
+      "speaker": "customer",
+      "text": "मेरा order अभी तक नहीं आया and nobody shared an update.",
+      "start_ms": 7718,
+      "end_ms": 13190
+    },
+    {
+      "speaker": "agent",
+      "text": "Delay के लिए I am sorry. Please अपना order reference confirm कर दीजिए.",
+      "start_ms": 13540,
+      "end_ms": 20380
+    },
+    {
+      "speaker": "customer",
+      "text": "Order number ओ आर डी two zero four eight है.",
+      "start_ms": 20730,
+      "end_ms": 25386
+    },
+    {
+      "speaker": "agent",
+      "text": "Thank you. Delivery कल scheduled है and I will send an SMS confirmation.",
+      "start_ms": 25736,
+      "end_ms": 32672
+    },
+    {
+      "speaker": "customer",
+      "text": "That works, मेरी problem solve हो गई. Thank you.",
+      "start_ms": 33022,
+      "end_ms": 38134
+    }
+  ]
+}

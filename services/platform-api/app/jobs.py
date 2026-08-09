@@ -6,17 +6,19 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .local_voice import finalize_local_voice
-from .models import Conversation, DurableJob, JobStatus
+from .external_voice import finalize_external_voice
+from .models import Conversation, DurableJob, JobStatus, Tenant
 
 
-VOICE_FINALIZE = "voice.finalize_local"
+VOICE_FINALIZE = "voice.finalize"
 
 
 def start_voice_finalization(db: Session, conversation: Conversation) -> DurableJob:
+    tenant = db.get(Tenant, conversation.tenant_id)
     job = DurableJob(
         tenant_id=conversation.tenant_id,
         job_type=VOICE_FINALIZE,
-        payload={"conversation_id": conversation.id},
+        payload={"conversation_id": conversation.id, "ai_mode": tenant.ai_mode if tenant else "local"},
         status=JobStatus.RUNNING,
         attempts=1,
         locked_at=datetime.now(timezone.utc),
@@ -34,7 +36,10 @@ def complete_job(db: Session, job_id: str) -> None:
     conversation = db.get(Conversation, job.payload["conversation_id"])
     if conversation is None:
         raise ValueError("Conversation for durable job no longer exists")
-    finalize_local_voice(db, conversation)
+    if job.payload.get("ai_mode") == "external":
+        finalize_external_voice(db, conversation)
+    else:
+        finalize_local_voice(db, conversation)
     job.status = JobStatus.SUCCEEDED
     job.locked_at = None
     job.last_error = None

@@ -79,7 +79,7 @@ class WrapUpRequest(BaseModel):
 class VoiceDialRequest(BaseModel):
     phone: str = Field(min_length=3, max_length=40)
     customer_name: str = Field(default="Voice customer", min_length=1, max_length=160)
-    language: str = Field(default="en", pattern="^en$")
+    language: str = Field(default="en", pattern="^(en|hi|mr|hi-en|auto)$")
 
 
 class VoiceControlRequest(BaseModel):

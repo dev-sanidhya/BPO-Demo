@@ -18,6 +18,14 @@ class Settings(BaseSettings):
     recording_dir: str = "/data/recordings"
     voice_fixture_path: str = "/fixtures/deterministic-pilot.wav"
     voice_fixture_manifest_path: str = "/fixtures/deterministic-pilot.json"
+    groq_api_key: str = ""
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_realtime_asr_model: str = "whisper-large-v3"
+    groq_final_asr_model: str = "whisper-large-v3"
+    groq_guidance_model: str = "openai/gpt-oss-20b"
+    groq_qa_model: str = "openai/gpt-oss-20b"
+    groq_timeout_seconds: float = 60.0
+    usd_to_inr: float = 84.0
 
     def validate_runtime(self) -> None:
         if self.environment != "development" and self.jwt_secret == "development-only-change-me":

@@ -1,6 +1,9 @@
 from fastapi.testclient import TestClient
 import asyncio
+import io
 import socket
+import wave
+import pytest
 
 from .conftest import auth
 
@@ -229,9 +232,93 @@ def test_strict_local_voice_finalization_attempts_no_network_egress(client: Test
     assert dialed.status_code == 201
     conversation_id = dialed.json()["conversation"]["id"]
     ended = client.post(f"/voice/calls/{conversation_id}/control", headers=auth(tokens["agent1"]), json={"action": "hangup"})
-    assert ended.status_code == 200
+    if ended.status_code != 200:
+        from app.models import DurableJob
+        with SessionLocal() as db:
+            failure = db.query(DurableJob).order_by(DurableJob.created_at.desc()).first()
+            pytest.fail(f"{ended.text}; durable failure: {failure.last_error if failure else 'missing job'}")
     diagnostics = client.get("/diagnostics", headers=auth(tokens["supervisor"])).json()
-    assert diagnostics["privacy"] == {"mode": "local", "customer_content_egress": False, "provider": "local_rules"}
+    assert diagnostics["privacy"]["mode"] == "local"
+    assert diagnostics["privacy"]["customer_content_egress"] is False
+    assert diagnostics["privacy"]["provider"] == "local_rules"
+    assert diagnostics["privacy"]["data_retention"] == "deployment-local"
+
+
+def test_external_voice_uses_provider_output_and_preserves_actual_csat_boundary(client: TestClient, tokens: dict[str, str], monkeypatch) -> None:
+    from app.ai import Analysis, Transcription, Usage
+    from app.database import SessionLocal
+    from app.models import Tenant
+    from app.config import get_settings
+    import app.external_voice as external_voice
+
+    class FakeGroq:
+        def __init__(self, _settings):
+            pass
+
+        def transcribe(self, _audio_path, model, language):
+            assert model == "whisper-large-v3"
+            assert language == "hi-en"
+            return Transcription(
+                text="Mera order late hai. Delivery kal scheduled hai.",
+                language="Hindi",
+                duration_seconds=20,
+                request_id="asr-test",
+                words=[],
+                segments=[
+                    {"text": "Mera order late hai.", "start_ms": 0, "end_ms": 5000, "avg_logprob": -0.1, "no_speech_prob": 0},
+                    {"text": "Delivery kal scheduled hai.", "start_ms": 6000, "end_ms": 11000, "avg_logprob": -0.1, "no_speech_prob": 0},
+                ],
+            )
+
+        def analyze(self, transcript, questions, script, knowledge, language, live=False):
+            assert transcript and questions and script and knowledge
+            assert language == "hi-en"
+            assert live is False
+            return Analysis(
+                payload={
+                    "detected_language": "hi-en",
+                    "summary": "Customer asked about a delayed order and was given tomorrow's delivery commitment.",
+                    "predicted_dissatisfaction_risk": 24,
+                    "assists": [{"event_type": "next_best_action", "title": "Confirm in writing", "content": "Send the promised delivery update.", "evidence_segment_index": 1}],
+                    "qa_answers": [{"question_id": item["id"], "passed": True, "score": 90, "confidence": 88, "evidence_segment_index": min(index, 1), "reasoning": "Supported by the transcript."} for index, item in enumerate(questions)],
+                },
+                usage=Usage(500, 200),
+                request_id="llm-test",
+            )
+
+    monkeypatch.setattr(get_settings(), "groq_api_key", "fake-test-key")
+    monkeypatch.setattr(external_voice, "GroqAI", FakeGroq)
+    with SessionLocal() as db:
+        tenant = db.query(Tenant).filter(Tenant.slug == "aperture-pilot").one()
+        tenant.ai_mode = "external"
+        db.commit()
+
+    dialed = client.post("/voice/calls/dial", headers=auth(tokens["agent1"]), json={"phone": "1003", "customer_name": "Hinglish Customer", "language": "hi-en"})
+    assert dialed.status_code == 201
+    assert dialed.json()["session"]["provider"] == "groq_external"
+    conversation_id = dialed.json()["conversation"]["id"]
+    fixture = io.BytesIO()
+    with wave.open(fixture, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(8000)
+        audio.writeframes(b"\0\0" * 8000)
+    uploaded = client.put(f"/voice/calls/{conversation_id}/recording", headers=auth(tokens["agent1"]), files={"file": ("call.wav", fixture.getvalue(), "audio/wav")})
+    assert uploaded.status_code == 200, uploaded.text
+    ended = client.post(f"/voice/calls/{conversation_id}/control", headers=auth(tokens["agent1"]), json={"action": "hangup"})
+    if ended.status_code != 200:
+        from app.models import DurableJob
+        with SessionLocal() as db:
+            failure = db.query(DurableJob).order_by(DurableJob.created_at.desc()).first()
+            pytest.fail(f"{ended.text}; durable failure: {failure.last_error if failure else 'missing job'}")
+    transcript = client.get(f"/conversations/{conversation_id}/transcript", headers=auth(tokens["agent1"])).json()
+    assert [item["text"] for item in transcript] == ["Mera order late hai.", "Delivery kal scheduled hai."]
+    evaluations = client.get("/qa/evaluations", headers=auth(tokens["supervisor"])).json()
+    evaluation = next(item for item in evaluations if item["conversation_id"] == conversation_id)
+    assert evaluation["provider"] == "groq"
+    report = client.get("/reports/summary?channel=voice", headers=auth(tokens["client"])).json()
+    assert report["actual_csat_count"] == 0
+    assert report["predicted_risk_count"] == 1
 
 
 def test_admin_can_configure_the_pilot_and_create_an_agent(client: TestClient, tokens: dict[str, str]) -> None:
