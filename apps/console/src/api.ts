@@ -1,4 +1,4 @@
-import type { AgentRow, ChatMessage, Conversation, User } from "./types";
+import type { AgentRow, AssistEvent, ChatMessage, Conversation, QAEvaluation, TranscriptSegment, User, VoiceSession } from "./types";
 
 const API_BASE = window.platformRuntime?.apiBase || import.meta.env.VITE_PLATFORM_API_URL || "/api";
 
@@ -35,9 +35,29 @@ export const api = {
   sendMessage: (token: string, id: string, content: string) => request<ChatMessage>(`/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }, token),
   presence: (token: string, status: string) => request(`/agents/me/presence`, { method: "PUT", body: JSON.stringify({ status }) }, token),
   wrapUp: (token: string, id: string, disposition: string, summary: string) => request<Conversation>(`/conversations/${id}/wrap-up`, { method: "POST", body: JSON.stringify({ disposition, summary }) }, token),
+  dialVoice: (token: string, phone: string, customerName: string, language: string) => request<{ conversation: Conversation; session: VoiceSession }>("/voice/calls/dial", { method: "POST", body: JSON.stringify({ phone, customer_name: customerName, language }) }, token),
+  voiceCall: (token: string, id: string) => request<{ conversation: Conversation; session: VoiceSession }>(`/voice/calls/${id}`, {}, token),
+  voiceControl: (token: string, id: string, action: string, target?: string) => request<VoiceSession>(`/voice/calls/${id}/control`, { method: "POST", body: JSON.stringify({ action, target }) }, token),
+  rejectVoice: (token: string, id: string) => request<VoiceSession>(`/voice/calls/${id}/reject`, { method: "POST" }, token),
+  transcript: (token: string, id: string) => request<TranscriptSegment[]>(`/conversations/${id}/transcript`, {}, token),
+  assist: (token: string, id: string) => request<AssistEvent[]>(`/conversations/${id}/assist`, {}, token),
+  recording: async (token: string, id: string) => { const response = await fetch(`${API_BASE}/conversations/${id}/recording`, { headers: { Authorization: `Bearer ${token}` } }); if (!response.ok) throw new ApiError(response.status, "Recording unavailable"); return response.blob(); },
+  qaEvaluations: (token: string) => request<QAEvaluation[]>("/qa/evaluations", {}, token),
+  qaDetail: (token: string, id: string) => request<Record<string, unknown>>(`/qa/evaluations/${id}`, {}, token),
+  reviewQA: (token: string, id: string, reviewedScore: number, reason: string) => request(`/qa/evaluations/${id}/reviews`, { method: "POST", body: JSON.stringify({ reviewed_score: reviewedScore, reason }) }, token),
+  configuration: (token: string) => request<Record<string, unknown>>("/configuration", {}, token),
+  diagnostics: (token: string) => request<Record<string, unknown>>("/diagnostics", {}, token),
+  updatePrivacy: (token: string, aiMode: string) => request("/configuration/privacy", { method: "PUT", body: JSON.stringify({ ai_mode: aiMode }) }, token),
+  updatePilot: (token: string, payload: Record<string, unknown>) => request("/configuration/pilot", { method: "PUT", body: JSON.stringify(payload) }, token),
+  createUser: (token: string, payload: Record<string, unknown>) => request<User>("/users", { method: "POST", body: JSON.stringify(payload) }, token),
+  reportSummary: (token: string, query = "") => request<Record<string, unknown>>(`/reports/summary${query}`, {}, token),
+  reportCosts: (token: string) => request<Record<string, unknown>>("/reports/costs", {}, token),
+  downloadReport: async (token: string, format: "csv" | "pdf", query = "") => { const response = await fetch(`${API_BASE}/reports/export.${format}${query}`, { headers: { Authorization: `Bearer ${token}` } }); if (!response.ok) throw new ApiError(response.status, "Report export failed"); return response.blob(); },
   startChat: (customerName: string, initialMessage: string, language: string) => request<{ conversation_id: string; session_token: string; status: string }>("/public/chat/start", { method: "POST", body: JSON.stringify({ tenant_slug: "aperture-pilot", widget_key: import.meta.env.VITE_CHAT_WIDGET_KEY || "pilot-widget-key-change-me", customer_name: customerName, language, initial_message: initialMessage }) }),
   customerMessages: (id: string, session: string) => request<ChatMessage[]>(`/public/chat/${id}/messages`, { headers: { "X-Chat-Session": session } }),
   sendCustomerMessage: (id: string, session: string, content: string) => request<ChatMessage>(`/public/chat/${id}/messages`, { method: "POST", headers: { "X-Chat-Session": session }, body: JSON.stringify({ content }) }),
+  customerStatus: (id: string, session: string) => request<{ status: string; actual_csat: number | null }>(`/public/chat/${id}/status`, { headers: { "X-Chat-Session": session } }),
+  submitSurvey: (id: string, session: string, csat: number) => request<{ actual_csat: number; source: string }>(`/public/chat/${id}/survey`, { method: "POST", headers: { "X-Chat-Session": session }, body: JSON.stringify({ csat }) }),
 };
 
 export function connectRealtime(token: string, onEvent: (event: Record<string, unknown>) => void): WebSocket {
