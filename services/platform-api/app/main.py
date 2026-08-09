@@ -7,8 +7,8 @@ from sqlalchemy.orm import Session
 
 from .database import Base, SessionLocal, engine, get_db
 from .dependencies import current_user, require_roles
-from .models import AgentPresence, AuditEvent, Conversation, ConversationStatus, Role, User
-from .schemas import AssignRequest, ConversationCreate, ConversationView, LoginRequest, PresenceUpdate, PresenceView, TokenResponse, UserView
+from .models import AgentPresence, AuditEvent, Conversation, ConversationStatus, QAAnswer, QAEvaluation, QAForm, QAQuestion, QAReview, Role, User
+from .schemas import AssignRequest, ConversationCreate, ConversationView, LoginRequest, PresenceUpdate, PresenceView, QAEvaluationCreate, QAFormCreate, QAReviewCreate, TokenResponse, UserView
 from .security import create_access_token, verify_password
 from .seed import seed_demo
 
@@ -110,3 +110,63 @@ def dashboard_summary(user: User = Depends(require_roles(Role.ADMIN, Role.SUPERV
     counts = dict(db.execute(select(Conversation.status, func.count()).where(Conversation.tenant_id == user.tenant_id).group_by(Conversation.status)).all())
     return {"conversations": {status.value: counts.get(status, 0) for status in ConversationStatus}}
 
+
+@app.post("/qa/forms", status_code=201)
+def create_qa_form(payload: QAFormCreate, user: User = Depends(require_roles(Role.ADMIN, Role.QA_REVIEWER)), db: Session = Depends(get_db)) -> dict:
+    form = QAForm(tenant_id=user.tenant_id, campaign_id=payload.campaign_id, name=payload.name, version=1)
+    db.add(form)
+    db.flush()
+    for position, question in enumerate(payload.questions, start=1):
+        db.add(QAQuestion(form_id=form.id, position=position, **question.model_dump()))
+    audit(db, user, "qa_form.created", "qa_form", form.id, {"question_count": len(payload.questions)})
+    db.commit()
+    return {"id": form.id, "name": form.name, "version": form.version}
+
+
+@app.post("/conversations/{conversation_id}/qa/evaluations", status_code=201)
+def create_qa_evaluation(conversation_id: str, payload: QAEvaluationCreate, user: User = Depends(require_roles(Role.ADMIN, Role.QA_REVIEWER, Role.SUPERVISOR)), db: Session = Depends(get_db)) -> dict:
+    conversation = db.get(Conversation, conversation_id)
+    form = db.get(QAForm, payload.form_id)
+    if conversation is None or conversation.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if form is None or form.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=400, detail="QA form not found")
+    question_ids = set(db.scalars(select(QAQuestion.id).where(QAQuestion.form_id == form.id)))
+    answer_ids = {answer.question_id for answer in payload.answers}
+    if answer_ids != question_ids:
+        raise HTTPException(status_code=400, detail="Evaluation must answer every form question exactly once")
+    for answer in payload.answers:
+        if answer.evidence_end_ms < answer.evidence_start_ms:
+            raise HTTPException(status_code=400, detail="Evidence end must be after evidence start")
+    evaluation = QAEvaluation(
+        tenant_id=user.tenant_id,
+        conversation_id=conversation.id,
+        form_id=form.id,
+        automatic_score=payload.automatic_score,
+        fatal_triggered=payload.fatal_triggered,
+        provider=payload.provider,
+        model=payload.model,
+        rubric_version=form.version,
+        summary=payload.summary,
+    )
+    db.add(evaluation)
+    db.flush()
+    db.add_all([QAAnswer(evaluation_id=evaluation.id, **answer.model_dump()) for answer in payload.answers])
+    audit(db, user, "qa_evaluation.created", "qa_evaluation", evaluation.id, {"conversation_id": conversation.id, "score": payload.automatic_score})
+    db.commit()
+    return {"id": evaluation.id, "automatic_score": evaluation.automatic_score, "reviewed_score": None, "status": evaluation.status}
+
+
+@app.post("/qa/evaluations/{evaluation_id}/reviews", status_code=201)
+def review_qa_evaluation(evaluation_id: str, payload: QAReviewCreate, user: User = Depends(require_roles(Role.ADMIN, Role.QA_REVIEWER, Role.SUPERVISOR)), db: Session = Depends(get_db)) -> dict:
+    evaluation = db.get(QAEvaluation, evaluation_id)
+    if evaluation is None or evaluation.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="QA evaluation not found")
+    previous_score = evaluation.reviewed_score if evaluation.reviewed_score is not None else evaluation.automatic_score
+    review = QAReview(evaluation_id=evaluation.id, reviewer_user_id=user.id, previous_score=previous_score, reviewed_score=payload.reviewed_score, reason=payload.reason)
+    db.add(review)
+    evaluation.reviewed_score = payload.reviewed_score
+    evaluation.status = "reviewed"
+    audit(db, user, "qa_evaluation.reviewed", "qa_evaluation", evaluation.id, {"previous_score": previous_score, "reviewed_score": payload.reviewed_score, "reason": payload.reason})
+    db.commit()
+    return {"id": review.id, "automatic_score": evaluation.automatic_score, "reviewed_score": evaluation.reviewed_score, "status": evaluation.status}

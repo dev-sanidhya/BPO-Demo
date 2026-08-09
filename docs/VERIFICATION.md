@@ -36,3 +36,9 @@ New implementation layers must add their commands, fixtures, results, and remain
 - Confirmed non-development configuration fails fast when JWT or seed credentials retain development defaults.
 
 The foundation currently owns tenants, users/roles, campaigns, queues/membership, contacts, conversations, messages, agent presence, and audit events. QA, scripts/knowledge, recordings, durable jobs, cost events, survey responses, and channel-specific data remain in subsequent implementation layers.
+
+## Compliance Data Foundation - 2026-08-09
+
+- Expanded the API schema with versioned scripts, knowledge articles, QA forms/questions, automatic evaluations, evidence spans, immutable review history, recordings, actual/predicted satisfaction separation, cost events, and durable jobs.
+- Added API acceptance coverage requiring every QA form question to have exactly one answer and every answer to carry timestamped evidence.
+- Verified that a supervisor review changes the reviewed score while preserving the original automatic score. Result: **6 API tests passed**.

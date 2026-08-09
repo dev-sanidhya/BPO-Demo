@@ -37,3 +37,43 @@ def test_client_viewer_cannot_assign_work(client: TestClient, tokens: dict[str, 
     response = client.post("/conversations/missing/assign", headers=auth(tokens["client"]), json={"user_id": "missing"})
     assert response.status_code == 403
 
+
+def test_qa_evidence_and_review_preserve_automatic_score(client: TestClient, tokens: dict[str, str]) -> None:
+    form_response = client.post(
+        "/qa/forms",
+        headers=auth(tokens["admin"]),
+        json={"name": "Pilot Compliance", "questions": [{"label": "Required disclosure delivered", "weight": 100, "fatal": True}]},
+    )
+    assert form_response.status_code == 201
+    form_id = form_response.json()["id"]
+    created = client.post("/conversations", headers=auth(tokens["supervisor"]), json={"channel": "voice", "direction": "inbound"})
+    conversation_id = created.json()["id"]
+
+    from app.database import SessionLocal
+    from app.models import QAQuestion
+    from sqlalchemy import select
+    with SessionLocal() as db:
+        question_id = db.scalar(select(QAQuestion.id).where(QAQuestion.form_id == form_id))
+
+    evaluation = client.post(
+        f"/conversations/{conversation_id}/qa/evaluations",
+        headers=auth(tokens["supervisor"]),
+        json={
+            "form_id": form_id,
+            "automatic_score": 40,
+            "fatal_triggered": True,
+            "provider": "local",
+            "model": "deterministic-fixture",
+            "summary": "Disclosure was incomplete.",
+            "answers": [{"question_id": question_id, "passed": False, "score": 40, "confidence": 92, "evidence_quote": "I can skip the disclosure.", "evidence_start_ms": 1200, "evidence_end_ms": 2600, "reasoning": "Required language is absent."}],
+        },
+    )
+    assert evaluation.status_code == 201
+    reviewed = client.post(
+        f"/qa/evaluations/{evaluation.json()['id']}/reviews",
+        headers=auth(tokens["supervisor"]),
+        json={"reviewed_score": 55, "reason": "The abbreviated disclosure is acceptable for this pilot."},
+    )
+    assert reviewed.status_code == 201
+    assert reviewed.json()["automatic_score"] == 40
+    assert reviewed.json()["reviewed_score"] == 55

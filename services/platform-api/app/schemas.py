@@ -70,3 +70,41 @@ class ConversationView(BaseModel):
 class AssignRequest(BaseModel):
     user_id: str
 
+
+class QAQuestionCreate(BaseModel):
+    label: str = Field(min_length=3, max_length=300)
+    guidance: str = ""
+    weight: int = Field(default=1, ge=1, le=100)
+    fatal: bool = False
+
+
+class QAFormCreate(BaseModel):
+    name: str = Field(min_length=3, max_length=160)
+    campaign_id: str | None = None
+    questions: list[QAQuestionCreate] = Field(min_length=1)
+
+
+class QAAnswerCreate(BaseModel):
+    question_id: str
+    passed: bool
+    score: int = Field(ge=0, le=100)
+    confidence: int = Field(ge=0, le=100)
+    evidence_quote: str = Field(min_length=1)
+    evidence_start_ms: int = Field(ge=0)
+    evidence_end_ms: int = Field(ge=0)
+    reasoning: str = ""
+
+
+class QAEvaluationCreate(BaseModel):
+    form_id: str
+    automatic_score: int = Field(ge=0, le=100)
+    fatal_triggered: bool = False
+    provider: str = Field(min_length=1, max_length=60)
+    model: str = Field(min_length=1, max_length=120)
+    summary: str = ""
+    answers: list[QAAnswerCreate] = Field(min_length=1)
+
+
+class QAReviewCreate(BaseModel):
+    reviewed_score: int = Field(ge=0, le=100)
+    reason: str = Field(min_length=5, max_length=2000)
