@@ -1,6 +1,6 @@
 # Verification Record
 
-Last verified: 2026-08-09. Results below are from the current source tree and a live Docker Desktop deployment on Windows. They do not imply 700-seat capacity certification.
+Last verified: 2026-08-10. Results below are from the current source tree and a live Docker Desktop deployment on Windows. They do not imply 700-seat capacity certification.
 
 ## Final Acceptance Result
 
@@ -8,7 +8,7 @@ Last verified: 2026-08-09. Results below are from the current source tree and a 
 |---|---|---|
 | Voice fixture | Pass | `python scripts\verify_voice_fixture.py`: 33,152 ms, 6 non-overlapping segments, agent + customer speakers. |
 | Frontend build | Pass | TypeScript project build and Vite production bundle; 1,835 modules transformed. |
-| API tests | Pass | 16 tests passed, including provider-backed voice behavior. One upstream Starlette `httpx` deprecation warning; no test failures. |
+| API tests | Pass | 18 tests passed, including provider-backed voice behavior, the external-AI default, and the explicit local fallback. One upstream Starlette `httpx` deprecation warning; no test failures. |
 | Compose validation/build | Pass | `docker compose config --quiet` and default-stack image builds passed. |
 | Running default stack | Pass | PostgreSQL, API, durable worker, console, and Asterisk running; PostgreSQL/API/Asterisk healthy. API `/health` returned `{"status":"ok"}`. |
 | Carrier-free SIP media | Pass | Electron 1001 and browser 1003 registered, extension 2003 established two-party WebRTC media, Asterisk exposed `PJSIP/1003`, and mute/hold/resume/hangup passed. |
@@ -16,7 +16,7 @@ Last verified: 2026-08-09. Results below are from the current source tree and a 
 | Electron source E2E | Pass | Full chat + inbound/outbound voice agent workflow; native 1426x779 viewport; no overflow, console warnings/errors, or failed requests. |
 | Windows package | Pass | NSIS installer built successfully and packaged executable passed login/runtime smoke test. |
 | Strict-local boundary | Pass | Voice finalization completed while outbound socket connections were forced to fail. Diagnostics reported local rules and `customer_content_egress=false`. |
-| Live Groq lane | Pass | Rebuilt containers processed a Hinglish WAV with `whisper-large-v3` and `openai/gpt-oss-20b`; transcript, Groq QA, request metadata, and cost evidence were persisted. Mode was restored to strict local afterward. |
+| Live Groq lane | Pass | Rebuilt containers default to external mode and processed a Hinglish WAV with `whisper-large-v3` and `openai/gpt-oss-20b`; four transcript segments, Groq QA, request metadata, and cost evidence were persisted. Diagnostics reported `provider=groq` and `external_ready=true`. |
 
 ## API Acceptance Coverage
 
@@ -111,8 +111,8 @@ The installer command `npm run electron:dist:win` produced:
 
 ## Privacy and Data Semantics
 
-- The verified default path uses deterministic local rules and local fixture/recording storage; no external AI credential is required.
-- Optional Groq processing is integrated into the platform API and durable worker. It is only used when an admin selects external mode and the server has a valid credential; it is not part of the strict-local claim.
+- The verified default path uses Groq and requires a real provider credential. Startup fails visibly when the default external route has no key.
+- Strict-local deterministic processing remains available only when an admin deliberately selects local mode. It does not silently replace failed Groq processing and is not a claim of local generative AI.
 - Every protected conversation read is tenant scoped. Client viewers are additionally campaign scoped on conversations, QA, reports, queues, and configuration.
 - Actual survey CSAT and predicted satisfaction risk are separate fields, counts, labels, and report values.
 - Human review does not overwrite the automatic QA result.

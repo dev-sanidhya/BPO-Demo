@@ -57,7 +57,7 @@ try {
   await admin.getByRole("button", { name: /Enter workspace/ }).click();
   await admin.getByRole("button", { name: /Settings/ }).click();
   await admin.getByRole("heading", { name: "Platform configuration" }).waitFor();
-  await admin.getByText(/Customer content stays inside/).waitFor();
+  await admin.getByText(/External AI mode is enabled/).waitFor();
   await admin.getByLabel("Campaign name").waitFor();
   await admin.getByRole("button", { name: "Save operating model" }).click();
   await admin.getByText("Pilot configuration saved and audited.").waitFor();

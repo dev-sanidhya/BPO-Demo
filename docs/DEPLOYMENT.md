@@ -1,22 +1,18 @@
 # Deployment and Carrier Onboarding
 
-Last updated: 2026-08-09.
+Last updated: 2026-08-10.
 
 ## What can go live without another vendor
 
-The unified portal, Electron desktop, Postgres data model, durable worker, web chat, reporting, strict-local fixtures, optional Groq processing, and same-host WebRTC/SIP calls all run in Docker plus the Windows desktop. This is suitable for a controlled 1-3 seat pilot on a private network after secrets, TLS, backups, retention, recording consent, and client configuration are completed.
+The unified portal, Electron desktop, Postgres data model, durable worker, web chat, reporting, default Groq processing, strict-local test fixtures, and same-host WebRTC/SIP calls all run in Docker plus the Windows desktop. This is suitable for a controlled 1-3 seat pilot on a private network after secrets, TLS, backups, retention, recording consent, and client configuration are completed.
 
 It is not a public production deployment or a 700-seat certification. There is no purchased DID, PSTN route, carrier SLA, HA cluster, disaster-recovery proof, or load result in this repository.
 
 ## AI modes
 
-### Strict local
-
-Default. No external credential is required. Customer-content network egress is false, and an automated test blocks outbound sockets while voice finalization succeeds. This repeatable lane uses known fixtures and deterministic rules; it is not a claim of local generative AI.
-
 ### Groq external
 
-Provide `GROQ_API_KEY` through an untracked environment file and restart the API and worker. Admins can then switch the tenant to external mode. The current model choices are:
+Default. Provide `GROQ_API_KEY` through the untracked `.env` before startup. The API and worker fail visibly instead of silently substituting deterministic output when the credential is absent. New tenants start in external mode. The current model choices are:
 
 | Job | Model | Why |
 |---|---|---|
@@ -26,6 +22,10 @@ Provide `GROQ_API_KEY` through an untracked environment file and restart the API
 The desktop records mixed call media, uploads standalone 15-second WebM chunks for near-realtime assist, then uploads the complete recording before hangup. Groq word timestamps feed transcript evidence. Configured scripts and the top lexical knowledge matches are passed to strict-schema analysis. The final durable job writes summary, assists, predicted risk, evidence-linked QA, provider/model/request metadata, and cost events. Provider errors fail visibly and remain retryable; they do not silently create a successful score.
 
 Groq says API customer data may be retained for up to 30 days by default unless an eligible Zero Data Retention arrangement applies. Confirm the client policy and Groq account configuration before real customer audio is enabled. `USD_TO_INR` is a configurable accounting assumption, not a live exchange-rate feed.
+
+### Strict local deterministic mode
+
+Optional fallback/test mode. Customer-content network egress is false, and an automated test blocks outbound sockets while voice finalization succeeds. This repeatable lane uses known fixtures and deterministic rules; it is not a claim of local generative AI. An admin must deliberately switch to it when client policy prohibits the default Groq route.
 
 ## Carrier-free SIP proof
 

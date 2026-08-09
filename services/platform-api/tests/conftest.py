@@ -13,6 +13,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("PLATFORM_JWT_SECRET", "test-secret-not-for-production-123456")
     monkeypatch.setenv("PLATFORM_SEED_ADMIN_PASSWORD", "PilotTest123!")
     monkeypatch.setenv("PLATFORM_RECORDING_DIR", str(tmp_path / "recordings"))
+    monkeypatch.setenv("PLATFORM_DEFAULT_AI_MODE", "local")
     monkeypatch.setenv("PLATFORM_VOICE_FIXTURE_PATH", str(tmp_path / "missing-fixture.wav"))
     monkeypatch.setenv("PLATFORM_VOICE_FIXTURE_MANIFEST_PATH", str(tmp_path / "missing-fixture.json"))
     for name in list(sys.modules):

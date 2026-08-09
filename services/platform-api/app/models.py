@@ -60,7 +60,7 @@ class Tenant(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(160), unique=True, nullable=False)
     slug: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
-    ai_mode: Mapped[str] = mapped_column(String(20), default="local", nullable=False)
+    ai_mode: Mapped[str] = mapped_column(String(20), default="external", nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 

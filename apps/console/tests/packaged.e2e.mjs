@@ -18,6 +18,8 @@ try {
   await window.getByLabel("Password").fill(password);
   await window.getByRole("button", { name: /Enter workspace/ }).click();
   await window.getByText("AGENT WORKSPACE").waitFor();
+  await window.getByText("Start AI sample").waitFor();
+  await window.getByText("Configured AI route", { exact: true }).waitFor();
   const fit = await window.evaluate(() => ({ width: innerWidth, height: innerHeight, scrollWidth: document.documentElement.scrollWidth, scrollHeight: document.documentElement.scrollHeight }));
   if (fit.scrollWidth > fit.width || fit.scrollHeight > fit.height) throw new Error(`Packaged shell overflowed: ${JSON.stringify(fit)}`);
   if (failures.length) throw new Error(failures.join("\n"));

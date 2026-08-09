@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -14,6 +15,7 @@ class Settings(BaseSettings):
     seed_admin_email: str = "admin@pilot.example"
     seed_admin_password: str = "ChangeMe123!"
     seed_chat_widget_key: str = "pilot-widget-key-change-me"
+    default_ai_mode: Literal["external", "local"] = "external"
     cors_origins: str = "http://localhost:4173,http://localhost:5173"
     recording_dir: str = "/data/recordings"
     voice_fixture_path: str = "/fixtures/deterministic-pilot.wav"
@@ -28,6 +30,8 @@ class Settings(BaseSettings):
     usd_to_inr: float = 84.0
 
     def validate_runtime(self) -> None:
+        if self.default_ai_mode == "external" and not self.groq_api_key:
+            raise RuntimeError("GROQ_API_KEY is required because external AI is the default processing route")
         if self.environment != "development" and self.jwt_secret == "development-only-change-me":
             raise RuntimeError("PLATFORM_JWT_SECRET must be set outside development")
         if self.environment != "development" and self.seed_admin_password == "ChangeMe123!":

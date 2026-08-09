@@ -18,7 +18,7 @@ The recommended product shape is implemented: agents use an installable Electron
 - Configurable campaign, queue, script, knowledge article, QA form, privacy mode, and role-based user provisioning.
 - Automatic QA with timestamped evidence, immutable original score, and reasoned human override.
 - Reports filtered by campaign, queue, channel, and agent, with campaign-scoped client access and matching CSV/PDF exports.
-- Strict-local default processing with an automated no-network voice finalization test, plus an admin-selectable Groq lane for real transcription, guidance, retrieval, summaries, evidence-linked QA, risk prediction, and measured per-call AI cost.
+- Groq-backed AI is the default processing route for real transcription, guidance, retrieval, summaries, evidence-linked QA, risk prediction, and measured per-call AI cost. Missing credentials fail startup visibly; strict-local deterministic processing remains an explicit admin-selected fallback/test mode.
 - A carrier-free two-party WebRTC path: the Electron agent registers as SIP 1001, a browser customer registers as 1003, and Asterisk routes extension 2003 with real audio and call controls.
 - Health, privacy/provider status, queue lag, recording storage, realtime event isolation, and audit events.
 
@@ -35,7 +35,7 @@ Customer web chat ──────┘           │
                                     └── local fixtures / Groq AI / Asterisk WebRTC
 ```
 
-The default Compose stack is local-first: `postgres`, `platform-api`, durable `platform-worker`, `console`, and `asterisk`. Voice evidence is recorded as a durable job before processing; a worker retries abandoned or transiently failed jobs. Groq is an optional provider inside that same durable pipeline, not a second product path. The lightweight browser SIP endpoint and Metabase remain optional profiles.
+The default Compose stack is AI-first: `postgres`, `platform-api`, durable `platform-worker`, `console`, and `asterisk`. Voice evidence is recorded as a durable job before processing; a worker retries abandoned or transiently failed jobs. Groq is the default provider inside that pipeline. The lightweight browser SIP endpoint and Metabase remain optional profiles.
 
 ## Quick start
 
@@ -43,7 +43,7 @@ Prerequisites: Docker Desktop and Node.js 22+ for local desktop builds.
 
 ```powershell
 Copy-Item .env.example .env
-# Edit .env and replace every change-me value.
+# Edit .env, replace every change-me value, and provide GROQ_API_KEY.
 docker compose up -d --build
 docker compose ps
 ```
@@ -78,9 +78,9 @@ npm run electron:dist:win
 
 The installer is written to `apps/console/release/Aperture CX Agent Setup 0.1.0.exe`. The desktop expects the API at `http://localhost:18080` by default; set `PLATFORM_API_URL` before launch when the on-prem server uses another address.
 
-### Real Groq AI mode
+### Default Groq AI mode
 
-Set `GROQ_API_KEY` in a local untracked environment file, start Compose with it, sign in as admin, then switch the privacy mode to `external`. The selected defaults are `whisper-large-v3` for realtime/final ASR and `openai/gpt-oss-20b` for guidance and QA. External mode sends call audio/transcript context to Groq; the UI and diagnostics say so explicitly. Never use it where the client's consent or data policy requires strict-local processing.
+Set `GROQ_API_KEY` in the local untracked `.env` before starting Compose. New deployments start in `external` mode and refuse to report ready when that credential is missing. The selected defaults are `whisper-large-v3` for realtime/final ASR and `openai/gpt-oss-20b` for guidance and QA. This sends call audio/transcript context to Groq; the UI and diagnostics say so explicitly. An admin can deliberately select strict-local deterministic mode for privacy-constrained testing, but that mode is not generative AI.
 
 ### Carrier-free live call
 

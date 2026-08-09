@@ -15,7 +15,7 @@ def seed_demo(db: Session) -> None:
 
     tenant = db.scalar(select(Tenant).where(Tenant.slug == "aperture-pilot"))
     if tenant is None:
-        tenant = Tenant(name="Aperture BPO Pilot", slug="aperture-pilot", ai_mode="local")
+        tenant = Tenant(name="Aperture BPO Pilot", slug="aperture-pilot", ai_mode=settings.default_ai_mode)
         db.add(tenant)
         db.flush()
 
@@ -64,7 +64,11 @@ def seed_demo(db: Session) -> None:
         voice_config = ChannelConfig(tenant_id=tenant.id, channel=Channel.VOICE)
         db.add(voice_config)
     voice_config.enabled = True
-    voice_config.settings = {"provider": "deterministic_local", "queue_id": queue.id, "sip_extension": "1001"}
+    voice_config.settings = {
+        "provider": "groq_external" if tenant.ai_mode == "external" else "deterministic_local",
+        "queue_id": queue.id,
+        "sip_extension": "1001",
+    }
 
     if db.scalar(select(ClientAccessGrant.id).where(ClientAccessGrant.user_id == users[4].id, ClientAccessGrant.campaign_id == campaign.id)) is None:
         db.add(ClientAccessGrant(tenant_id=tenant.id, user_id=users[4].id, campaign_id=campaign.id))
