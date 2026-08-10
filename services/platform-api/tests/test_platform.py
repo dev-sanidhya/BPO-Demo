@@ -184,6 +184,12 @@ def test_local_voice_controls_recording_transcript_qa_and_exports(client: TestCl
     assert transferred.json()["transfer_target"] == "supervisor-desk"
     ended = client.post(f"/voice/calls/{conversation_id}/control", headers=auth(tokens["agent1"]), json={"action": "hangup"})
     assert ended.json()["state"] == "ended"
+    from app.database import SessionLocal
+    from app.jobs import claim_recoverable_job, complete_job
+    with SessionLocal() as db:
+        job = claim_recoverable_job(db)
+        assert job is not None
+        complete_job(db, job.id)
     diagnostics = client.get("/diagnostics", headers=auth(tokens["supervisor"])).json()
     assert diagnostics["jobs"]["succeeded"] >= 1
     transcript = client.get(f"/conversations/{conversation_id}/transcript", headers=auth(tokens["agent1"]))
@@ -221,6 +227,17 @@ def test_inbound_voice_can_be_rejected_or_accepted_from_the_shared_queue(client:
     assert second_id in [item["id"] for item in queued]
     assert client.post(f"/conversations/{second_id}/claim", headers=auth(tokens["agent1"])).status_code == 200
     assert client.get(f"/voice/calls/{second_id}", headers=auth(tokens["agent1"])).json()["session"]["state"] == "active"
+    assert client.post(f"/voice/calls/{second_id}/control", headers=auth(tokens["agent1"]), json={"action": "hangup"}).status_code == 200
+    assert client.post(f"/conversations/{second_id}/wrap-up", headers=auth(tokens["agent1"]), json={"disposition": "resolved", "summary": "Inbound fixture completed."}).status_code == 200
+
+    live = client.post("/voice/calls/register-live-inbound", headers=auth(tokens["agent1"]), json={"phone": "1003", "customer_name": "Live SIP caller 1003", "language": "auto"})
+    assert live.status_code == 201
+    live_id = live.json()["conversation"]["id"]
+    assert live.json()["conversation"]["direction"] == "inbound"
+    assert live.json()["session"]["provider_call_id"].startswith("sip-inbound-")
+    assert live.json()["session"]["state"] == "ringing"
+    assert client.post(f"/conversations/{live_id}/claim", headers=auth(tokens["agent1"])).status_code == 200
+    assert client.get(f"/voice/calls/{live_id}", headers=auth(tokens["agent1"])).json()["session"]["state"] == "active"
 
 
 def test_strict_local_voice_finalization_attempts_no_network_egress(client: TestClient, tokens: dict[str, str], monkeypatch) -> None:
@@ -311,6 +328,11 @@ def test_external_voice_uses_provider_output_and_preserves_actual_csat_boundary(
         with SessionLocal() as db:
             failure = db.query(DurableJob).order_by(DurableJob.created_at.desc()).first()
             pytest.fail(f"{ended.text}; durable failure: {failure.last_error if failure else 'missing job'}")
+    from app.jobs import claim_recoverable_job, complete_job
+    with SessionLocal() as db:
+        job = claim_recoverable_job(db)
+        assert job is not None
+        complete_job(db, job.id)
     transcript = client.get(f"/conversations/{conversation_id}/transcript", headers=auth(tokens["agent1"])).json()
     assert [item["text"] for item in transcript] == ["Mera order late hai.", "Delivery kal scheduled hai."]
     evaluations = client.get("/qa/evaluations", headers=auth(tokens["supervisor"])).json()

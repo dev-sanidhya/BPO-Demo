@@ -1,4 +1,4 @@
-import type { AgentRow, AssistEvent, ChatMessage, Conversation, QAEvaluation, TranscriptSegment, User, VoiceSession } from "./types";
+import type { AgentRow, AssistEvent, ChatMessage, Conversation, EvidenceProvenance, QAEvaluation, TranscriptSegment, User, VoiceSession } from "./types";
 
 const API_BASE = window.platformRuntime?.apiBase || import.meta.env.VITE_PLATFORM_API_URL || "/api";
 
@@ -36,14 +36,16 @@ export const api = {
   presence: (token: string, status: string) => request(`/agents/me/presence`, { method: "PUT", body: JSON.stringify({ status }) }, token),
   wrapUp: (token: string, id: string, disposition: string, summary: string) => request<Conversation>(`/conversations/${id}/wrap-up`, { method: "POST", body: JSON.stringify({ disposition, summary }) }, token),
   dialVoice: (token: string, phone: string, customerName: string, language: string) => request<{ conversation: Conversation; session: VoiceSession }>("/voice/calls/dial", { method: "POST", body: JSON.stringify({ phone, customer_name: customerName, language }) }, token),
+  registerLiveInbound: (token: string, phone: string, customerName: string, language: string) => request<{ conversation: Conversation; session: VoiceSession }>("/voice/calls/register-live-inbound", { method: "POST", body: JSON.stringify({ phone, customer_name: customerName, language }) }, token),
   voiceCall: (token: string, id: string) => request<{ conversation: Conversation; session: VoiceSession }>(`/voice/calls/${id}`, {}, token),
   voiceControl: (token: string, id: string, action: string, target?: string) => request<VoiceSession>(`/voice/calls/${id}/control`, { method: "POST", body: JSON.stringify({ action, target }) }, token),
   rejectVoice: (token: string, id: string) => request<VoiceSession>(`/voice/calls/${id}/reject`, { method: "POST" }, token),
   transcript: (token: string, id: string) => request<TranscriptSegment[]>(`/conversations/${id}/transcript`, {}, token),
   assist: (token: string, id: string) => request<AssistEvent[]>(`/conversations/${id}/assist`, {}, token),
+  evidence: (token: string, id: string) => request<EvidenceProvenance>(`/conversations/${id}/evidence`, {}, token),
   recording: async (token: string, id: string) => { const response = await fetch(`${API_BASE}/conversations/${id}/recording`, { headers: { Authorization: `Bearer ${token}` } }); if (!response.ok) throw new ApiError(response.status, "Recording unavailable"); return response.blob(); },
   uploadRecording: async (token: string, id: string, blob: Blob, durationMs: number) => { const form = new FormData(); form.append("file", blob, "browser-call.webm"); form.append("duration_ms", String(durationMs)); const response = await fetch(`${API_BASE}/voice/calls/${id}/recording`, { method: "PUT", headers: { Authorization: `Bearer ${token}` }, body: form }); if (!response.ok) { const body = await response.json().catch(() => ({ detail: "Recording upload failed" })); throw new ApiError(response.status, body.detail); } return response.json(); },
-  ingestVoiceChunk: async (token: string, id: string, blob: Blob, startMs: number) => { const form = new FormData(); form.append("file", blob, "live-chunk.webm"); form.append("speaker", "unknown"); form.append("start_ms", String(startMs)); const response = await fetch(`${API_BASE}/voice/calls/${id}/audio-chunks`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form }); if (!response.ok) { const body = await response.json().catch(() => ({ detail: "Live AI failed" })); throw new ApiError(response.status, body.detail); } return response.json(); },
+  ingestVoiceChunk: async (token: string, id: string, blob: Blob, startMs: number, speaker: "agent" | "customer") => { const form = new FormData(); form.append("file", blob, `live-${speaker}-chunk.webm`); form.append("speaker", speaker); form.append("start_ms", String(startMs)); const response = await fetch(`${API_BASE}/voice/calls/${id}/audio-chunks`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form }); if (!response.ok) { const body = await response.json().catch(() => ({ detail: "Live AI failed" })); throw new ApiError(response.status, body.detail); } return response.json() as Promise<{ segments: TranscriptSegment[]; assists: AssistEvent[]; detected_language: string; guidance_error?: string }>; },
   qaEvaluations: (token: string) => request<QAEvaluation[]>("/qa/evaluations", {}, token),
   qaDetail: (token: string, id: string) => request<Record<string, unknown>>(`/qa/evaluations/${id}`, {}, token),
   reviewQA: (token: string, id: string, reviewedScore: number, reason: string) => request(`/qa/evaluations/${id}/reviews`, { method: "POST", body: JSON.stringify({ reviewed_score: reviewedScore, reason }) }, token),

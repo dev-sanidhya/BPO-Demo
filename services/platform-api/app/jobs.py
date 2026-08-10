@@ -19,9 +19,10 @@ def start_voice_finalization(db: Session, conversation: Conversation) -> Durable
         tenant_id=conversation.tenant_id,
         job_type=VOICE_FINALIZE,
         payload={"conversation_id": conversation.id, "ai_mode": tenant.ai_mode if tenant else "local"},
-        status=JobStatus.RUNNING,
-        attempts=1,
-        locked_at=datetime.now(timezone.utc),
+        status=JobStatus.PENDING,
+        attempts=0,
+        available_at=datetime.now(timezone.utc),
+        locked_at=None,
     )
     db.add(job)
     db.commit()
@@ -31,7 +32,7 @@ def start_voice_finalization(db: Session, conversation: Conversation) -> Durable
 
 def complete_job(db: Session, job_id: str) -> None:
     job = db.get(DurableJob, job_id)
-    if job is None:
+    if job is None or job.status == JobStatus.SUCCEEDED:
         return
     conversation = db.get(Conversation, job.payload["conversation_id"])
     if conversation is None:
@@ -63,7 +64,10 @@ def record_failure(db: Session, job_id: str, error: Exception) -> None:
 
 def claim_recoverable_job(db: Session) -> DurableJob | None:
     now = datetime.now(timezone.utc)
-    stale = now - timedelta(seconds=30)
+    # Provider-backed transcription and rubric evaluation can legitimately take
+    # several minutes under rate limiting. Do not let another worker reclaim a
+    # healthy in-flight job and create duplicate QA evidence.
+    stale = now - timedelta(minutes=15)
     job = db.scalar(
         select(DurableJob)
         .where(

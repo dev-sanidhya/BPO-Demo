@@ -1,17 +1,68 @@
+type Speaker = "agent" | "customer";
+
+class SpeakerCapture {
+  private active = true;
+  private elapsedMs = 0;
+  private recorder: MediaRecorder | null = null;
+  private timer: number | null = null;
+  private pending: Promise<void>[] = [];
+  private failure: unknown = null;
+
+  constructor(
+    private stream: MediaStream,
+    private speaker: Speaker,
+    private onChunk: (blob: Blob, startMs: number, speaker: Speaker) => Promise<void>,
+  ) {
+    this.startSegment();
+  }
+
+  private startSegment() {
+    if (!this.active || !this.stream.getAudioTracks().length) return;
+    const startMs = this.elapsedMs;
+    const startedAt = performance.now();
+    const recorder = new MediaRecorder(this.stream, { mimeType: "audio/webm;codecs=opus" });
+    const chunks: Blob[] = [];
+    this.recorder = recorder;
+    recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
+    recorder.onstop = () => {
+      const durationMs = Math.max(roundToSecond(performance.now() - startedAt), 1_000);
+      this.elapsedMs = startMs + durationMs;
+      const blob = new Blob(chunks, { type: "audio/webm" });
+      if (blob.size) {
+        const upload = this.onChunk(blob, startMs, this.speaker).catch((error) => { this.failure = error; });
+        this.pending.push(upload);
+      }
+      if (this.active) this.startSegment();
+    };
+    recorder.start();
+    this.timer = window.setTimeout(() => { if (recorder.state === "recording") recorder.stop(); }, 15_000);
+  }
+
+  async stop() {
+    this.active = false;
+    if (this.timer !== null) window.clearTimeout(this.timer);
+    const stopped = new Promise<void>((resolve) => {
+      const recorder = this.recorder;
+      if (!recorder || recorder.state !== "recording") { resolve(); return; }
+      const previous = recorder.onstop;
+      recorder.onstop = (event) => { previous?.call(recorder, event); resolve(); };
+      recorder.stop();
+    });
+    await stopped;
+    await Promise.all(this.pending);
+    if (this.failure) throw this.failure;
+  }
+}
+
 export class CallCapture {
   private context: AudioContext;
   private destination: MediaStreamAudioDestinationNode;
   private fullRecorder: MediaRecorder;
   private fullChunks: Blob[] = [];
-  private segmentRecorder: MediaRecorder | null = null;
-  private segmentTimer: number | null = null;
-  private active = true;
-  private elapsedMs = 0;
+  private speakerCaptures: SpeakerCapture[];
   private startedAt = performance.now();
-  private onChunk: (blob: Blob, startMs: number) => Promise<void>;
 
-  constructor(remote: MediaStream, local: MediaStream, onChunk: (blob: Blob, startMs: number) => Promise<void>) {
-    this.onChunk = onChunk;
+  constructor(remote: MediaStream, local: MediaStream, onChunk: (blob: Blob, startMs: number, speaker: Speaker) => Promise<void>) {
     this.context = new AudioContext();
     this.destination = this.context.createMediaStreamDestination();
     if (remote.getAudioTracks().length) this.context.createMediaStreamSource(remote).connect(this.destination);
@@ -19,32 +70,14 @@ export class CallCapture {
     this.fullRecorder = new MediaRecorder(this.destination.stream, { mimeType: "audio/webm;codecs=opus" });
     this.fullRecorder.ondataavailable = (event) => { if (event.data.size) this.fullChunks.push(event.data); };
     this.fullRecorder.start();
-    this.startSegment();
-  }
-
-  private startSegment() {
-    if (!this.active) return;
-    const startMs = this.elapsedMs;
-    const started = performance.now();
-    const recorder = new MediaRecorder(this.destination.stream, { mimeType: "audio/webm;codecs=opus" });
-    this.segmentRecorder = recorder;
-    const chunks: Blob[] = [];
-    recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
-    recorder.onstop = () => {
-      const duration = Math.max(roundToSecond(performance.now() - started), 1_000);
-      this.elapsedMs = startMs + duration;
-      const blob = new Blob(chunks, { type: "audio/webm" });
-      if (blob.size && this.active) void this.onChunk(blob, startMs);
-      if (this.active) this.startSegment();
-    };
-    recorder.start();
-    this.segmentTimer = window.setTimeout(() => { if (recorder.state === "recording") recorder.stop(); }, 15_000);
+    this.speakerCaptures = [
+      new SpeakerCapture(remote, "customer", onChunk),
+      new SpeakerCapture(local, "agent", onChunk),
+    ];
   }
 
   async stop(): Promise<{ blob: Blob; durationMs: number }> {
-    this.active = false;
-    if (this.segmentTimer !== null) window.clearTimeout(this.segmentTimer);
-    if (this.segmentRecorder?.state === "recording") this.segmentRecorder.stop();
+    await Promise.all(this.speakerCaptures.map((capture) => capture.stop()));
     const blob = await new Promise<Blob>((resolve) => {
       this.fullRecorder.onstop = () => resolve(new Blob(this.fullChunks, { type: "audio/webm" }));
       if (this.fullRecorder.state === "recording") this.fullRecorder.stop();

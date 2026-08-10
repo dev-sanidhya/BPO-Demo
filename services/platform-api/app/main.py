@@ -15,10 +15,10 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .config import get_settings
-from .ai import GroqAI, estimate_asr_cost_micros_inr, estimate_llm_cost_micros_inr, retrieve_knowledge
+from .ai import AIProviderError, GroqAI, estimate_asr_cost_micros_inr, estimate_llm_cost_micros_inr, retrieve_knowledge
 from .database import Base, SessionLocal, engine, get_db
 from .dependencies import current_user, require_roles
-from .jobs import complete_job, record_failure, start_voice_finalization
+from .jobs import start_voice_finalization
 from .models import AgentPresence, AgentStatus, AssistEvent, AuditEvent, Campaign, Channel, ChannelConfig, ChatSession, ClientAccessGrant, Contact, Conversation, ConversationStatus, CostEvent, DurableJob, JobStatus, KnowledgeArticle, Message, QAAnswer, QAEvaluation, QAForm, QAQuestion, QAReview, QueueMember, Recording, Role, Script, SurveyResponse, Tenant, TranscriptSegment, User, VoiceSession, WorkQueue
 from .realtime import realtime_hub
 from .reporting import simple_pdf
@@ -358,11 +358,23 @@ async def ingest_voice_chunk(
         created_segments.append({"id": row.id, "speaker": row.speaker, "text": row.text, "start_ms": row.start_ms, "end_ms": row.end_ms, "language": row.language, "confidence": row.confidence})
     all_rows = list(db.scalars(select(TranscriptSegment).where(TranscriptSegment.conversation_id == conversation.id).order_by(TranscriptSegment.start_ms)))
     transcript = [{"speaker": row.speaker, "text": row.text, "start_ms": row.start_ms, "end_ms": row.end_ms} for row in all_rows]
+    db.add(CostEvent(tenant_id=user.tenant_id, conversation_id=conversation.id, category="transcription", provider=settings.groq_realtime_asr_model, units=max(round(result.duration_seconds), 1), unit_name="audio_seconds", cost_micros_inr=estimate_asr_cost_micros_inr(settings.groq_realtime_asr_model, result.duration_seconds, settings.usd_to_inr)))
+    if not transcript:
+        audit(db, user, "voice.chunk_transcribed", "conversation", conversation.id, {"speaker": speaker, "start_ms": start_ms, "segments": 0, "asr_request_id": result.request_id})
+        db.commit()
+        return {"segments": [], "assists": [], "detected_language": result.language}
     script = db.scalar(select(Script).where(Script.tenant_id == user.tenant_id, Script.active.is_(True)).order_by(Script.version.desc()))
     articles = list(db.scalars(select(KnowledgeArticle).where(KnowledgeArticle.tenant_id == user.tenant_id, KnowledgeArticle.active.is_(True))))
     article_payload = [{"title": item.title, "content": item.content, "tags": item.tags} for item in articles]
     retrieved = retrieve_knowledge(" ".join(row["text"] for row in transcript), article_payload)
-    analysis = provider.analyze(transcript, [], script.content if script else "Use professional customer-service practices.", retrieved, conversation.language, live=True)
+    try:
+        analysis = provider.analyze(transcript, [], script.content if script else "Use professional customer-service practices.", retrieved, conversation.language, live=True)
+    except AIProviderError as error:
+        message = str(error)
+        audit(db, user, "voice.live_guidance_failed", "conversation", conversation.id, {"speaker": speaker, "start_ms": start_ms, "asr_request_id": result.request_id, "error": message[:500]})
+        db.commit()
+        await realtime_hub.publish(user.tenant_id, {"type": "assist.failed", "conversation_id": conversation.id, "detail": message}, user.id)
+        return {"segments": created_segments, "assists": [], "detected_language": result.language, "guidance_error": message}
     assists: list[dict] = []
     for item in analysis.payload["assists"][:3]:
         index = max(0, min(int(item["evidence_segment_index"]), len(transcript) - 1))
@@ -371,7 +383,6 @@ async def ingest_voice_chunk(
         db.add(event)
         db.flush()
         assists.append({"id": event.id, "event_type": event.event_type, "title": event.title, "content": event.content, "evidence_start_ms": event.evidence_start_ms, "evidence_end_ms": event.evidence_end_ms, "metadata": event.metadata_json})
-    db.add(CostEvent(tenant_id=user.tenant_id, conversation_id=conversation.id, category="transcription", provider=settings.groq_realtime_asr_model, units=max(round(result.duration_seconds), 1), unit_name="audio_seconds", cost_micros_inr=estimate_asr_cost_micros_inr(settings.groq_realtime_asr_model, result.duration_seconds, settings.usd_to_inr)))
     usage_tokens = analysis.usage.input_tokens + analysis.usage.output_tokens
     db.add(CostEvent(tenant_id=user.tenant_id, conversation_id=conversation.id, category="inference", provider=settings.groq_guidance_model, units=usage_tokens, unit_name="tokens", cost_micros_inr=estimate_llm_cost_micros_inr(settings.groq_guidance_model, analysis.usage, settings.usd_to_inr)))
     audit(db, user, "voice.chunk_analyzed", "conversation", conversation.id, {"speaker": speaker, "start_ms": start_ms, "segments": len(created_segments), "asr_request_id": result.request_id, "analysis_request_id": analysis.request_id})
@@ -400,6 +411,31 @@ async def simulate_inbound_voice(payload: VoiceDialRequest, user: User = Depends
     return {"conversation": ConversationView.model_validate(conversation), "session": _voice_view(session)}
 
 
+@app.post("/voice/calls/register-live-inbound", status_code=201)
+async def register_live_inbound_voice(payload: VoiceDialRequest, user: User = Depends(require_roles(Role.AGENT)), db: Session = Depends(get_db)) -> dict:
+    active = db.scalar(select(Conversation.id).where(Conversation.assigned_user_id == user.id, Conversation.status == ConversationStatus.ACTIVE))
+    if active:
+        raise HTTPException(status_code=409, detail="Agent already has an active interaction")
+    config = db.scalar(select(ChannelConfig).where(ChannelConfig.tenant_id == user.tenant_id, ChannelConfig.channel == Channel.VOICE, ChannelConfig.enabled.is_(True)))
+    queue = db.get(WorkQueue, config.settings.get("queue_id")) if config else None
+    if queue is None:
+        raise HTTPException(status_code=409, detail="Voice queue is not configured")
+    tenant = db.get(Tenant, user.tenant_id)
+    provider = "groq_external" if tenant and tenant.ai_mode == "external" else "deterministic_local"
+    contact = Contact(tenant_id=user.tenant_id, name=payload.customer_name, phone=payload.phone, language=payload.language)
+    db.add(contact)
+    db.flush()
+    conversation = Conversation(tenant_id=user.tenant_id, campaign_id=queue.campaign_id, queue_id=queue.id, contact_id=contact.id, channel=Channel.VOICE, status=ConversationStatus.QUEUED, direction="inbound", language=payload.language)
+    db.add(conversation)
+    db.flush()
+    session = VoiceSession(conversation_id=conversation.id, tenant_id=user.tenant_id, provider=provider, provider_call_id=f"sip-inbound-{conversation.id}", state="ringing")
+    db.add(session)
+    audit(db, user, "voice.inbound_registered", "conversation", conversation.id, {"provider": provider, "source": "asterisk_webrtc"})
+    db.commit()
+    await realtime_hub.publish(user.tenant_id, {"type": "conversation.queued", "conversation_id": conversation.id, "channel": "voice"}, user.id)
+    return {"conversation": ConversationView.model_validate(conversation), "session": _voice_view(session)}
+
+
 @app.post("/voice/calls/{conversation_id}/reject")
 async def reject_inbound_voice(conversation_id: str, user: User = Depends(require_roles(Role.AGENT)), db: Session = Depends(get_db)) -> dict:
     conversation = db.get(Conversation, conversation_id)
@@ -425,7 +461,9 @@ def get_voice_call(conversation_id: str, user: User = Depends(current_user), db:
     session = db.get(VoiceSession, conversation.id)
     if conversation.channel != Channel.VOICE or session is None:
         raise HTTPException(status_code=404, detail="Voice call not found")
-    return {"conversation": ConversationView.model_validate(conversation), "session": _voice_view(session)}
+    session_view = _voice_view(session)
+    session_view["recording_available"] = db.scalar(select(Recording.id).where(Recording.conversation_id == conversation.id)) is not None
+    return {"conversation": ConversationView.model_validate(conversation), "session": session_view}
 
 
 @app.post("/voice/calls/{conversation_id}/control")
@@ -450,7 +488,6 @@ async def control_voice(conversation_id: str, payload: VoiceControlRequest, user
         if not payload.target:
             raise HTTPException(status_code=400, detail="Transfer target is required")
         session.transfer_target = payload.target
-    job: DurableJob | None = None
     if payload.action == "hangup":
         session.state = "ended"
         session.ended_at = datetime.now(timezone.utc)
@@ -462,12 +499,9 @@ async def control_voice(conversation_id: str, payload: VoiceControlRequest, user
             presence.changed_at = datetime.now(timezone.utc)
     audit(db, user, f"voice.{payload.action}", "conversation", conversation.id, {"target": payload.target})
     if payload.action == "hangup":
-        job = start_voice_finalization(db, conversation)
-        try:
-            complete_job(db, job.id)
-        except Exception as error:
-            record_failure(db, job.id, error)
-            raise HTTPException(status_code=500, detail="Voice evidence processing was queued for retry") from error
+        # Media teardown must never wait on transcription or QA. A single durable
+        # worker claims this job and retries provider failures independently.
+        start_voice_finalization(db, conversation)
     else:
         db.commit()
     db.refresh(session)
@@ -487,6 +521,32 @@ def conversation_assist(conversation_id: str, user: User = Depends(current_user)
     _authorized_conversation(db, user, conversation_id)
     events = db.scalars(select(AssistEvent).where(AssistEvent.conversation_id == conversation_id).order_by(AssistEvent.created_at))
     return [{"id": event.id, "event_type": event.event_type, "title": event.title, "content": event.content, "evidence_start_ms": event.evidence_start_ms, "evidence_end_ms": event.evidence_end_ms, "metadata": event.metadata_json} for event in events]
+
+
+@app.get("/conversations/{conversation_id}/evidence")
+def conversation_evidence(conversation_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    conversation = _authorized_conversation(db, user, conversation_id)
+    provenance = db.scalar(
+        select(AuditEvent)
+        .where(AuditEvent.tenant_id == user.tenant_id, AuditEvent.entity_type == "conversation", AuditEvent.entity_id == conversation.id, AuditEvent.action == "evidence.provenance_recorded")
+        .order_by(AuditEvent.created_at.desc())
+    )
+    if provenance:
+        return {"conversation_id": conversation.id, **provenance.details, "recorded_at": provenance.created_at.isoformat()}
+    session = db.get(VoiceSession, conversation.id) if conversation.channel == Channel.VOICE else None
+    live_sip = bool(session and session.provider_call_id.startswith("sip-"))
+    return {
+        "conversation_id": conversation.id,
+        "classification": "live_platform_interaction" if live_sip else "unattributed_interaction",
+        "label": "Live platform capture" if live_sip else "Source attribution not attached",
+        "source_name": None,
+        "source_url": None,
+        "license": None,
+        "source_id": None,
+        "transformations": [],
+        "boundary": "This record has no external dataset attribution. Verify the participant and capture context before using it as demo evidence.",
+        "recorded_at": None,
+    }
 
 
 @app.get("/conversations/{conversation_id}/recording")

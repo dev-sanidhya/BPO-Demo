@@ -47,6 +47,7 @@ export interface VoiceSession {
   muted: boolean;
   held: boolean;
   transfer_target: string | null;
+  recording_available?: boolean;
 }
 
 export interface TranscriptSegment {
@@ -67,6 +68,19 @@ export interface AssistEvent {
   evidence_start_ms: number | null;
   evidence_end_ms: number | null;
   metadata: Record<string, unknown>;
+}
+
+export interface EvidenceProvenance {
+  conversation_id: string;
+  classification: string;
+  label: string;
+  source_name: string | null;
+  source_url: string | null;
+  license: string | null;
+  source_id: string | null;
+  transformations: string[];
+  boundary: string;
+  recorded_at: string | null;
 }
 
 export interface QAEvaluation {

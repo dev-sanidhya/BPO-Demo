@@ -43,8 +43,8 @@ if (!chatStart.ok) throw new Error(`Could not create E2E chat: ${chatStart.statu
 const chat = await chatStart.json();
 const supervisorLogin = await fetch(`${apiBase}/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: "supervisor@pilot.example", password }) }).then((response) => response.json());
 const createInbound = (name, phone) => fetch(`${apiBase}/voice/calls/simulate-inbound`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${supervisorLogin.access_token}` }, body: JSON.stringify({ phone, customer_name: name, language: "en" }) }).then((response) => response.json());
-const rejectedInbound = await createInbound("Reject fixture", "+919100000001");
-const acceptedInbound = await createInbound("Accept fixture", "+919100000002");
+const rejectedInbound = await createInbound("Reject control test", "+919100000001");
+const acceptedInbound = await createInbound("Accept control test", "+919100000002");
 
 const electronApp = await electron.launch({ args: ["."], cwd: appDir });
 const window = await electronApp.firstWindow();
@@ -98,8 +98,9 @@ try {
   ]);
   await window.getByRole("button", { name: "Hang up" }).click();
   await window.getByText("Call complete", { exact: true }).waitFor();
-  await window.getByText(/I am sorry about the delay/).waitFor();
-  await window.getByLabel("Call recording").waitFor();
+  // A queue-only simulated call has no media and must not fabricate a
+  // transcript, recording, guidance, or QA. The strict SIP test owns those
+  // evidence assertions with two real human speech tracks.
   await window.screenshot({ path: path.join(evidenceDir, "electron-voice-evidence.png") });
   await window.getByRole("button", { name: /Complete wrap-up/ }).click();
   await window.getByText("Start a voice interaction").waitFor();

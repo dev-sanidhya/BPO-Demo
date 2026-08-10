@@ -71,34 +71,41 @@ def finalize_external_voice(db: Session, conversation: Conversation) -> None:
     settings = get_settings()
     recording, fixture_manifest = _ensure_recording(db, conversation)
     provider = GroqAI(settings)
-    transcription = provider.transcribe(recording.storage_key, settings.groq_final_asr_model, conversation.language)
-    db.execute(delete(TranscriptSegment).where(TranscriptSegment.conversation_id == conversation.id))
-    source_segments = _fixture_segments(transcription, fixture_manifest) or [{**item, "speaker": "unknown"} for item in transcription.segments]
+    live_rows = list(db.scalars(select(TranscriptSegment).where(TranscriptSegment.conversation_id == conversation.id).order_by(TranscriptSegment.start_ms, TranscriptSegment.created_at)))
+    use_live_segments = bool(live_rows) and all(row.speaker in {"agent", "customer"} for row in live_rows)
     segments: list[dict] = []
-    for item in source_segments:
-        segment = {
-            **item,
-            "speaker": item["speaker"],
-            "language": conversation.language if conversation.language != "auto" else transcription.language,
-            "confidence": _confidence(item["avg_logprob"], item["no_speech_prob"]),
-        }
-        segments.append(segment)
-        db.add(TranscriptSegment(
-            tenant_id=conversation.tenant_id,
-            conversation_id=conversation.id,
-            speaker=segment["speaker"],
-            text=segment["text"],
-            start_ms=segment["start_ms"],
-            end_ms=segment["end_ms"],
-            language=segment["language"],
-            confidence=segment["confidence"],
-        ))
+    transcription = None
+    if use_live_segments:
+        segments = [{"speaker": row.speaker, "text": row.text, "start_ms": row.start_ms, "end_ms": row.end_ms, "language": row.language, "confidence": row.confidence} for row in live_rows]
+    else:
+        transcription = provider.transcribe(recording.storage_key, settings.groq_final_asr_model, conversation.language)
+        db.execute(delete(TranscriptSegment).where(TranscriptSegment.conversation_id == conversation.id))
+        source_segments = _fixture_segments(transcription, fixture_manifest) or [{**item, "speaker": "unknown"} for item in transcription.segments]
+        for item in source_segments:
+            segment = {
+                **item,
+                "speaker": item["speaker"],
+                "language": conversation.language if conversation.language != "auto" else transcription.language,
+                "confidence": _confidence(item["avg_logprob"], item["no_speech_prob"]),
+            }
+            segments.append(segment)
+            db.add(TranscriptSegment(
+                tenant_id=conversation.tenant_id,
+                conversation_id=conversation.id,
+                speaker=segment["speaker"],
+                text=segment["text"],
+                start_ms=segment["start_ms"],
+                end_ms=segment["end_ms"],
+                language=segment["language"],
+                confidence=segment["confidence"],
+            ))
     if not segments:
         raise RuntimeError("Groq returned no speech segments")
 
     script = db.scalar(select(Script).where(Script.tenant_id == conversation.tenant_id, Script.active.is_(True)).order_by(Script.version.desc()))
     articles = list(db.scalars(select(KnowledgeArticle).where(KnowledgeArticle.tenant_id == conversation.tenant_id, KnowledgeArticle.active.is_(True))))
-    retrieved = retrieve_knowledge(transcription.text, [{"title": item.title, "content": item.content, "tags": item.tags} for item in articles])
+    transcript_text = " ".join(item["text"] for item in segments)
+    retrieved = retrieve_knowledge(transcript_text, [{"title": item.title, "content": item.content, "tags": item.tags} for item in articles])
     form = db.scalar(select(QAForm).where(QAForm.tenant_id == conversation.tenant_id, QAForm.active.is_(True)).order_by(QAForm.version.desc()))
     questions = list(db.scalars(select(QAQuestion).where(QAQuestion.form_id == form.id).order_by(QAQuestion.position))) if form else []
     question_payload = [{"id": item.id, "label": item.label, "guidance": item.guidance, "weight": item.weight, "fatal": item.fatal} for item in questions]
@@ -163,8 +170,9 @@ def finalize_external_voice(db: Session, conversation: Conversation) -> None:
 
     risk = max(0, min(int(payload["predicted_dissatisfaction_risk"]), 100))
     db.add(SurveyResponse(tenant_id=conversation.tenant_id, conversation_id=conversation.id, actual_csat=None, predicted_satisfaction_risk=risk, source="predicted_groq_v1"))
-    db.add(CostEvent(tenant_id=conversation.tenant_id, conversation_id=conversation.id, category="telephony", provider="recording_import", units=max(recording.duration_ms // 1000, 1), unit_name="seconds", cost_micros_inr=0))
-    db.add(CostEvent(tenant_id=conversation.tenant_id, conversation_id=conversation.id, category="transcription", provider=settings.groq_final_asr_model, units=max(recording.duration_ms // 1000, 1), unit_name="audio_seconds", cost_micros_inr=estimate_asr_cost_micros_inr(settings.groq_final_asr_model, recording.duration_ms / 1000, settings.usd_to_inr)))
+    db.add(CostEvent(tenant_id=conversation.tenant_id, conversation_id=conversation.id, category="telephony", provider="asterisk_webrtc" if use_live_segments else "recording_import", units=max(recording.duration_ms // 1000, 1), unit_name="seconds", cost_micros_inr=0))
+    if transcription is not None:
+        db.add(CostEvent(tenant_id=conversation.tenant_id, conversation_id=conversation.id, category="transcription", provider=settings.groq_final_asr_model, units=max(recording.duration_ms // 1000, 1), unit_name="audio_seconds", cost_micros_inr=estimate_asr_cost_micros_inr(settings.groq_final_asr_model, recording.duration_ms / 1000, settings.usd_to_inr)))
     total_tokens = analysis.usage.input_tokens + analysis.usage.output_tokens
     db.add(CostEvent(tenant_id=conversation.tenant_id, conversation_id=conversation.id, category="inference", provider=settings.groq_qa_model, units=total_tokens, unit_name="tokens", cost_micros_inr=estimate_llm_cost_micros_inr(settings.groq_qa_model, analysis.usage, settings.usd_to_inr)))
     db.add(CostEvent(tenant_id=conversation.tenant_id, conversation_id=conversation.id, category="storage", provider="local_disk", units=Path(recording.storage_key).stat().st_size, unit_name="bytes", cost_micros_inr=0))

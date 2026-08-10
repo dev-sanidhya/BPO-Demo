@@ -22,6 +22,7 @@ const HOST = params.get("host") || window.location.hostname;
 const SIP_WS_URL = `ws://${HOST}:8088/ws`;
 const SIP_EXTENSION = params.get("ext") || "1001";
 const SIP_PASSWORD = params.get("pass") || "changeme1001";
+const DEFAULT_TARGET = params.get("target");
 const REALTIME_WS_URL = `ws://${HOST}:8765`;
 
 // --- Elements -----------------------------------------------------------
@@ -31,6 +32,7 @@ const dialTargetEl = document.getElementById("dial-target");
 const callBtn = document.getElementById("call-btn");
 const hangupBtn = document.getElementById("hangup-btn");
 const remoteAudioEl = document.getElementById("remote-audio");
+if (DEFAULT_TARGET) dialTargetEl.value = DEFAULT_TARGET;
 const promptsEl = document.getElementById("prompts");
 
 // --- SIP (JsSIP) ----------------------------------------------------------

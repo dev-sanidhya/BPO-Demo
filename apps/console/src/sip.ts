@@ -4,6 +4,7 @@ export type SipStatus = "disabled" | "connecting" | "registered" | "calling" | "
 
 export interface SipEvents {
   onStatus: (status: SipStatus, detail?: string) => void;
+  onIncoming: (remote: string) => void;
   onEnded: () => void;
   onMedia: (remote: MediaStream, local: MediaStream) => void;
 }
@@ -51,6 +52,15 @@ export class SipPhone {
     this.session = this.ua.call(`sip:${target}@${config.host}`, { mediaConstraints: { audio: true, video: false } });
   }
 
+  answer() {
+    if (!this.session || this.session.direction !== "incoming") throw new Error("No incoming SIP call is waiting");
+    this.session.answer({ mediaConstraints: { audio: true, video: false } });
+  }
+
+  reject() {
+    if (this.session && !this.session.isEnded?.()) this.session.terminate({ status_code: 486, reason_phrase: "Busy Here" });
+  }
+
   mute(value: boolean) {
     if (!this.session) return;
     value ? this.session.mute({ audio: true }) : this.session.unmute({ audio: true });
@@ -72,6 +82,11 @@ export class SipPhone {
 
   private bindSession(session: any) {
     this.session = session;
+    if (session.direction === "incoming") {
+      const remote = String(session.remote_identity?.uri?.user || "unknown");
+      this.events.onStatus("calling", `Incoming SIP call from ${remote}`);
+      this.events.onIncoming(remote);
+    }
     const ended = (resetStatus = true) => {
       this.session = null;
       if (resetStatus) this.events.onStatus("registered", `SIP ${window.platformRuntime?.sip?.extension || ""}`);

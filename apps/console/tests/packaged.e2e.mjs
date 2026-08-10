@@ -2,7 +2,7 @@ import { _electron as electron } from "playwright";
 import path from "node:path";
 
 const appDir = path.resolve(import.meta.dirname, "..");
-const executablePath = path.join(appDir, "release", "win-unpacked", "Aperture CX Agent.exe");
+const executablePath = process.env.APERTURE_EXECUTABLE_PATH || path.join(appDir, "release", "win-unpacked", "Aperture CX Agent.exe");
 const password = process.env.PILOT_PASSWORD || "PilotTest123!";
 const failures = [];
 const electronApp = await electron.launch({ executablePath });
