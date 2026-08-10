@@ -19,33 +19,31 @@ The recommended product shape is implemented: agents use an installable Electron
 - Automatic QA with timestamped evidence, immutable original score, and reasoned human override.
 - Reports filtered by campaign, queue, channel, and agent, with campaign-scoped client access and matching CSV/PDF exports.
 - Groq-backed AI is the default processing route for real transcription, guidance, retrieval, summaries, evidence-linked QA, risk prediction, and measured per-call AI cost. Missing credentials fail startup visibly; strict-local deterministic processing remains an explicit admin-selected fallback/test mode.
-- A carrier-free two-party WebRTC path: the Electron agent registers as SIP 1001, a browser customer registers as 1003, and Asterisk routes extension 2003 with real audio and call controls.
+- Carrier-free two-party WebRTC in both directions: the Electron agent registers as SIP 1001, a browser customer as 1003, and Asterisk routes outbound extension 2003 and inbound extension 2101 through the same recording/AI/QA pipeline.
 - Health, privacy/provider status, queue lag, recording storage, realtime event isolation, and audit events.
 
-The deterministic lane includes synchronized English, Hindi, Marathi, and Hinglish fixtures. The external lane has been exercised against English and CC-BY FLEURS Hindi/Marathi speech plus synthetic support calls. Hindi and Hinglish are demo-ready; the measured Marathi sample accuracy is not strong enough for autonomous scoring, so Marathi is visibly review-required. A production carrier trunk, 700-seat capacity/HA certification, predictive dialing, workforce management, native WhatsApp onboarding, and screen recording are post-pilot work, not current claims.
+The default visible dataset contains four CC-BY-4.0 human-performed simulated banking calls from HarperValleyBank plus one explicitly labelled transcript-channel replay. Each record carries source, license, hashes, transformation history, and an honest production-data boundary in the UI. The current licensed call set is English. Hindi, Marathi, and Hinglish processing paths remain available, but Marathi is visibly review-required based on the existing small benchmark. A production carrier trunk, 700-seat capacity/HA certification, predictive dialing, workforce management, native WhatsApp onboarding, and screen recording are post-pilot work, not current claims.
 
 ## Architecture
 
 ```text
-Electron agent desktop ─┐
-Web operations portal ──┼── FastAPI platform API ── PostgreSQL
-Customer web chat ──────┘           │
-                                    ├── recording/transcript/QA evidence
-                                    ├── realtime authorized events
-                                    └── local fixtures / Groq AI / Asterisk WebRTC
+Electron agent desktop --+
+Web operations portal ----+-- FastAPI platform API -- PostgreSQL
+Customer web chat --------+             |
+                                        +-- recording/transcript/QA evidence
+                                        +-- realtime authorized events
+                                        +-- Groq AI / Asterisk WebRTC
 ```
 
 The default Compose stack is AI-first: `postgres`, `platform-api`, durable `platform-worker`, `console`, and `asterisk`. Voice evidence is recorded as a durable job before processing; a worker retries abandoned or transiently failed jobs. Groq is the default provider inside that pipeline. The lightweight browser SIP endpoint and Metabase remain optional profiles.
 
 ## Quick start
 
-Prerequisites: Docker Desktop and Node.js 22+ for local desktop builds.
+Prerequisites: Docker Desktop and the packaged desktop build. Node.js 22+ is needed only when rebuilding.
 
 ```powershell
-Copy-Item .env.example .env
-# Edit .env, replace every change-me value, and provide GROQ_API_KEY.
-docker compose up -d --build
-docker compose ps
+# The launcher safely reads GROQ_API_KEY from the Windows User environment.
+powershell -ExecutionPolicy Bypass -File scripts\start_demo.ps1
 ```
 
 Open:
@@ -53,6 +51,9 @@ Open:
 - Operations portal: http://localhost:18081
 - API health: http://localhost:18080/health
 - Customer widget: http://localhost:18081/?widget=1
+- Talkable browser customer endpoint: http://localhost:18082/?ext=1003&pass=changeme1003&assist=0&target=2101
+
+See [docs/DEMO_GUIDE.md](docs/DEMO_GUIDE.md) for the exact outbound, inbound, supervisor, QA, reports, and client-viewer walkthrough.
 
 Seeded local-pilot identities all use `PLATFORM_SEED_ADMIN_PASSWORD`:
 
@@ -80,9 +81,9 @@ The installer is written to `apps/console/release/Aperture CX Agent Setup 0.1.0.
 
 ### Default Groq AI mode
 
-Set `GROQ_API_KEY` in the local untracked `.env` before starting Compose. New deployments start in `external` mode and refuse to report ready when that credential is missing. The selected defaults are `whisper-large-v3` for realtime/final ASR and `openai/gpt-oss-20b` for guidance and QA. This sends call audio/transcript context to Groq; the UI and diagnostics say so explicitly. An admin can deliberately select strict-local deterministic mode for privacy-constrained testing, but that mode is not generative AI.
+Set `GROQ_API_KEY` in the local untracked `.env` or the current process environment before starting Compose. `scripts\start_demo.ps1` safely inherits it from the Windows User environment. New deployments start in `external` mode and refuse to report ready when that credential is missing. The selected defaults are `whisper-large-v3` for realtime/final ASR and `openai/gpt-oss-20b` for guidance and QA. This sends call audio/transcript context to Groq; the UI and diagnostics say so explicitly. An admin can deliberately select strict-local deterministic mode for privacy-constrained testing, but that mode is not generative AI.
 
-### Carrier-free live call
+### Carrier-free live calls
 
 ```powershell
 $env:AGENT_UI_PORT='18082'
@@ -93,7 +94,7 @@ $env:PLATFORM_SIP_ENABLED='true'
 npm run electron:dev
 ```
 
-Open `http://localhost:18082/?ext=1003&pass=changeme1003&assist=0`, allow microphone access, then dial `2003` from Electron. This is real same-machine WebRTC/SIP media through Asterisk, not PSTN. Replace the demo SIP passwords before any shared network use. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for carrier onboarding.
+Open `http://localhost:18082/?ext=1003&pass=changeme1003&assist=0&target=2101`, allow microphone access, then dial `2003` from Electron for outbound. Click **Call** in the browser for inbound through Asterisk route `2101 -> 1001`. These are real same-machine WebRTC/SIP media paths, not PSTN. Replace the demo SIP passwords before any shared network use. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for carrier onboarding.
 
 ## Reproducible verification
 

@@ -3,6 +3,7 @@ __pycache__/
 .env
 *.wav
 !asterisk/test-audio/*.wav
+!demo-data/harper-valley/audio/**/*.wav
 node_modules/
 dist/
 release/

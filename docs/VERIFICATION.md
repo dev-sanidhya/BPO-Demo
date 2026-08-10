@@ -1,153 +1,63 @@
 # Verification Record
 
-Last verified: 2026-08-10. Results below are from the current source tree and a live Docker Desktop deployment on Windows. They do not imply 700-seat capacity certification.
+Last verified: 2026-08-10 on Windows with Docker Desktop. This record applies to the current source and local evidence baseline; it is not a 700-seat or production-HA certification.
 
-## Final Acceptance Result
+## Final acceptance
 
-| Layer | Result | Evidence |
+| Layer | Result | Current evidence |
 |---|---|---|
-| Voice fixture | Pass | `python scripts\verify_voice_fixture.py`: 33,152 ms, 6 non-overlapping segments, agent + customer speakers. |
-| Frontend build | Pass | TypeScript project build and Vite production bundle; 1,835 modules transformed. |
-| API tests | Pass | 18 tests passed, including provider-backed voice behavior, the external-AI default, and the explicit local fallback. One upstream Starlette `httpx` deprecation warning; no test failures. |
-| Compose validation/build | Pass | `docker compose config --quiet` and default-stack image builds passed. |
-| Running default stack | Pass | PostgreSQL, API, durable worker, console, and Asterisk running; PostgreSQL/API/Asterisk healthy. API `/health` returned `{"status":"ok"}`. |
-| Carrier-free SIP media | Pass | Electron 1001 and browser 1003 registered, extension 2003 established two-party WebRTC media, Asterisk exposed `PJSIP/1003`, and mute/hold/resume/hangup passed. |
-| Web E2E | Pass | Installed Chrome at 1600x900 and mobile 375x812; no overflow, console warnings/errors, or failed requests. |
-| Electron source E2E | Pass | Full chat + inbound/outbound voice agent workflow; native 1426x779 viewport; no overflow, console warnings/errors, or failed requests. |
-| Windows package | Pass | NSIS installer built successfully and packaged executable passed login/runtime smoke test. |
-| Strict-local boundary | Pass | Voice finalization completed while outbound socket connections were forced to fail. Diagnostics reported local rules and `customer_content_egress=false`. |
-| Live Groq lane | Pass | Rebuilt containers default to external mode and processed a Hinglish WAV with `whisper-large-v3` and `openai/gpt-oss-20b`; four transcript segments, Groq QA, request metadata, and cost evidence were persisted. Diagnostics reported `provider=groq` and `external_ready=true`. |
+| API | Pass | 18 tests passed; one upstream Starlette/httpx deprecation warning. |
+| Frontend | Pass | TypeScript and Vite production build passed; 1,835 modules transformed. |
+| Clean evidence baseline | Pass | 5 closed interactions: 4 licensed voice calls and 1 labelled transcript-channel replay; 5 provenance audits; 4 Groq QA evaluations; 0 actual-CSAT claims. |
+| Browser E2E | Pass | Desktop 1600 px, mobile portal 375 px, customer widget 375 px; zero captured console/network failures; 5 evidence records and 4 Groq evaluations observed. |
+| Electron controls | Pass | Exact chat claim/reply/wrap-up, inbound reject/accept, mute, unmute, hold, resume, transfer, hang-up, outbound start, and native 1426x779 fit. Queue-only simulations made no transcript/recording/AI claims. |
+| Outbound SIP + AI | Pass | Electron 1001 -> Asterisk 2003 -> browser 1003; separate human speech tracks, two-party media, 4 role-correct live transcript segments, stored recording, Groq QA, wrap-up. |
+| Inbound SIP + AI | Pass | Browser 1003 -> Asterisk 2101 -> Electron 1001; ringing queue, accept, two-party media, 4 role-correct live transcript segments, stored recording, Groq QA. |
+| Durability | Pass | Hang-up returns without waiting for Groq; one background worker claims finalization; a 15-minute stale lock prevents duplicate evaluation under rate-limited processing; provider failures remain retryable. |
+| Package | Pass | Unpacked executable and silently installed executable both logged in and passed native-window fit. |
+| Installer | Pass | `Aperture CX Agent Setup 0.1.0.exe`, 101,773,464 bytes, SHA-256 `1AA9491A75F1BB765F6C9B4C947C5DB855C61E75A4601EDFA9BB318D0B935F97`. Authenticode status: `NotSigned`. |
+| Startup launcher | Pass | `scripts/start_demo.ps1 -NoDesktop` inherited the Windows User Groq key, started the six required services, and reached API health. |
 
-## API Acceptance Coverage
+## Clean baseline semantics
 
-The isolated API suite verifies:
+- Source: Stanford/Gridspace HarperValleyBank human-performed simulated banking calls, CC BY 4.0.
+- Boundary: these are published simulated calls, not production customer calls.
+- Transformations: original caller and agent tracks are transcribed separately by `whisper-large-v3`; caller-left/agent-right stereo is built without speech synthesis; `openai/gpt-oss-20b` produces guidance, summaries, predicted risk, and one schema-validated answer per rubric question.
+- Visible result: 4 voice records, 1 transcript-channel replay, average automatic QA 84, range 40-99, average predicted dissatisfaction risk 10, and estimated measured usage cost INR 1.57.
+- Actual CSAT count is zero. Published partner ratings stay in provenance metadata and are not mapped to CSAT.
+- The score of 40 is retained: Groq ASR heard a branch-hours answer that conflicts with published task metadata. This is a useful real model/data finding, not corrected demo data.
 
-- Login/current-user identity and role denial.
-- Tenant/campaign scoped conversations, queues, configuration, reports, and client access.
-- Queue membership, assignment, presence, claim, and wrap-up.
-- Server-authorized realtime events with a negative assertion that an unrelated agent receives no assigned event.
-- Web-chat session security, ordered two-way messages, status, close, and actual 1-5 CSAT collection.
-- Inbound voice reject/accept and outbound voice dial.
-- Mute, hold, resume, transfer, hang-up, recording, two-speaker transcript, assist, evidence-linked QA, CSV/PDF exports, and separated cost categories.
-- Durable voice-finalization success state, retry metadata, stale-lock recovery, and job counts in diagnostics.
-- Immutable automatic QA score plus reviewed score and reason.
-- Strict-local voice evidence processing with network connections blocked.
-- Admin campaign/queue/script/knowledge/QA configuration and user provisioning.
-- Actual survey CSAT kept separate from predicted satisfaction risk.
-
-Command:
+## Commands run
 
 ```powershell
 docker run --rm -v "C:\CS\Agency\BPO-Demo\services\platform-api\tests:/app/tests:ro" bpo-demo-platform-api pytest -q
+
+Set-Location C:\CS\Agency\BPO-Demo\apps\console
+npm run build
+npm run test:e2e:web
+npm run test:e2e:electron
+npm run test:e2e:sip
+npm run electron:pack
+npm run test:e2e:packaged
+npx electron-builder --win nsis --prepackaged release\win-unpacked
 ```
 
-Result: `16 passed, 1 warning in 23.98s`.
+The strict SIP test intentionally used separate CC-BY human caller/agent files as fake microphone inputs while exercising actual WebRTC/SIP media. This makes the test repeatable without claiming a live human was present during automation. It validated outbound and inbound media independently before the clean baseline was restored.
 
-## Browser Acceptance Coverage
+## AI choice and measured pricing basis
 
-`npm run test:e2e:web` verified:
+- `whisper-large-v3` remains the accuracy-first multilingual ASR model. Groq currently lists it at USD 0.111 per audio hour and explicitly recommends it for error-sensitive multilingual work.
+- `openai/gpt-oss-20b` is used for live guidance and QA because it supports JSON Schema output, has a 131,072-token context window, and is priced at USD 0.075/M uncached input tokens and USD 0.30/M output tokens.
+- Cost values in the UI are estimates derived from measured audio seconds/model tokens and configured USD-to-INR conversion. They are not invoices.
+- Groq rate limits were observed during the final SIP run. Bounded retry succeeded; the desktop remained responsive because final QA is asynchronous.
 
-- Invalid login feedback and supervisor login.
-- Operations overview, conversation explorer, and QA evidence.
-- Human QA override to 91 while the original automatic score of 88 remained visible.
-- Report filters, CSV download, and valid PDF download.
-- Admin operating-model save and new role-user provisioning.
-- Client-viewer access without QA override controls.
-- Marathi mobile customer chat, agent claim/reply/wrap-up, resolved state, and recorded 5/5 CSAT.
-- Desktop and mobile horizontal-fit assertions.
-- Zero captured browser console warnings/errors and zero failed requests.
+Official model sources: https://console.groq.com/docs/model/whisper-large-v3, https://console.groq.com/docs/model/openai/gpt-oss-20b, and https://groq.com/pricing.
 
-Result:
+## Honest limits
 
-```json
-{"ok":true,"desktopFit":{"width":1600,"scrollWidth":1600},"mobileFit":{"width":375,"scrollWidth":375},"pages":["Aperture CX","Aperture CX"]}
-```
-
-Screenshots are written to `artifacts/ui/`, including:
-
-- `web-supervisor-dashboard.png`
-- `web-quality-review.png`
-- `web-reports-costs.png`
-- `web-admin-configuration.png`
-- `mobile-customer-widget.png`
-- `mobile-customer-survey.png`
-
-## Electron Acceptance Coverage
-
-`npm run test:e2e:electron` creates exact interaction IDs and verifies:
-
-- Agent login and work queue.
-- Exact web-chat claim, reply, customer-side visibility, and wrap-up.
-- Exact inbound voice rejection and acceptance.
-- Mute/unmute, hold/resume, transfer, and hang-up.
-- Playable recording, synchronized transcript, agent/customer labels, assist guidance, and required-step completion.
-- Outbound deterministic voice interaction and wrap-up.
-- Native-window fit plus zero captured console/network failures.
-
-Result:
-
-```json
-{"ok":true,"title":"Aperture CX","fit":{"width":1426,"height":779,"scrollWidth":1426,"scrollHeight":779}}
-```
-
-Screenshots: `artifacts/ui/electron-agent-workspace.png`, `electron-active-conversation.png`, and `electron-voice-evidence.png`.
-
-`npm run test:e2e:sip` separately proves the actual media path. It launches a customer WebRTC endpoint in Chrome and the agent in Electron, registers both through Asterisk, dials 2003, waits for confirmed two-party media, observes the live Asterisk channel, and exercises mute, hold, resume, and hangup.
-
-Result:
-
-```json
-{"ok":true,"registered":["1001","1003"],"dialed":"2003","asteriskMediaChannel":"PJSIP/1003","callState":"ended"}
-```
-
-Screenshot: `artifacts/ui/electron-live-sip-call.png`.
-
-The installer command `npm run electron:dist:win` produced:
-
-- `apps/console/release/Aperture CX Agent Setup 0.1.0.exe` (101,772,578 bytes in this run).
-- `apps/console/release/win-unpacked/Aperture CX Agent.exe`.
-
-`npm run test:e2e:packaged` then launched that packaged executable, logged in, rendered the agent workspace, and passed the same 1426x779 fit check.
-
-## Privacy and Data Semantics
-
-- The verified default path uses Groq and requires a real provider credential. Startup fails visibly when the default external route has no key.
-- Strict-local deterministic processing remains available only when an admin deliberately selects local mode. It does not silently replace failed Groq processing and is not a claim of local generative AI.
-- Every protected conversation read is tenant scoped. Client viewers are additionally campaign scoped on conversations, QA, reports, queues, and configuration.
-- Actual survey CSAT and predicted satisfaction risk are separate fields, counts, labels, and report values.
-- Human review does not overwrite the automatic QA result.
-
-## Multilingual AI Measurements
-
-These are small model-selection measurements, not population accuracy claims. Word-error rate is lower-is-better.
-
-| Audio | License/source | `whisper-large-v3-turbo` WER | `whisper-large-v3` WER | Decision |
-|---|---|---:|---:|---|
-| English deterministic support call | Generated fixture | Excellent transcript | Excellent transcript | v3 latency difference was immaterial. |
-| Hindi FLEURS sample | Google FLEURS, CC-BY-4.0 | 0.375 | 0.292 | Use v3. |
-| Marathi FLEURS sample | Google FLEURS, CC-BY-4.0 | 0.800 | 0.800 | Human review required. |
-| Synthetic Hindi support call | Generated fixture | 0.225 | 0.212 | Use v3. |
-| Synthetic Marathi support call | Generated fixture | 0.524 | 0.444 | Human review required. |
-| Synthetic Hinglish support call | Generated fixture | 0.400 | 0.114 | Use v3. |
-
-The real public-domain help-line sample and English fixture also completed provider transcription. A final rebuilt-container smoke produced a real Groq transcript and QA evaluation. Because a user-uploaded recording is a mixed track and Groq Whisper does not provide diarization here, arbitrary uploads are honestly labeled `unknown` speaker. Known test manifests retain speaker labels; production speaker attribution needs separate channel recording/diarization.
-
-## Honest Pilot Boundaries
-
-Verified:
-
-- One unified voice + web-chat pilot workflow for 1-3 seats.
-- Deterministic synchronized English/Hindi/Marathi/Hinglish voice lanes, real Groq multilingual processing, and carrier-free two-party WebRTC media.
-- English/Hindi/Marathi/Hinglish digital selection and Marathi/code-switched browser fixtures.
-- An installable Windows agent desktop plus web operations/client portal.
-
-Not yet verified or claimed:
-
-- Live PSTN carrier onboarding and production trunk failover.
-- Native WhatsApp/Meta onboarding.
-- Autonomous Marathi voice QA or speaker attribution for arbitrary mixed recordings.
-- 700 concurrent seats, high availability, disaster recovery, or formal load certification.
-- Predictive/progressive dialing, workforce scheduling, screen recording, or automated customer voice agents.
-- Code-signed Windows publisher identity or a custom application icon; the current installer uses Electron's default icon.
-
-The Asterisk base image logs non-required module warnings for unused CDR/CEL/OGG modules. The configured PJSIP endpoints and health check still pass; those warnings do not affect the deterministic pilot lane.
+- No PSTN carrier trunk, Indian number/KYC/DLT onboarding, or trunk failover was exercised.
+- No 700-seat load, HA, failover, recovery-time, or disaster-recovery certification was performed.
+- The clean licensed call set is English. Hindi, Marathi, and Hinglish product paths exist, but no equally strong multilingual human call corpus is included in the visible baseline. Marathi remains review-required.
+- No predictive/progressive dialer, workforce scheduling, screen recording, native WhatsApp, or autonomous voice bot is claimed.
+- The installer is not code-signed and uses Electron's default icon.
+- External mode sends audio/transcript context to Groq. It is not fully local/private AI.

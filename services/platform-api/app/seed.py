@@ -15,16 +15,16 @@ def seed_demo(db: Session) -> None:
 
     tenant = db.scalar(select(Tenant).where(Tenant.slug == "aperture-pilot"))
     if tenant is None:
-        tenant = Tenant(name="Aperture BPO Pilot", slug="aperture-pilot", ai_mode=settings.default_ai_mode)
+        tenant = Tenant(name="Aperture CX Evidence Demo", slug="aperture-pilot", ai_mode=settings.default_ai_mode)
         db.add(tenant)
         db.flush()
 
     user_specs = [
-        (settings.seed_admin_email.lower(), "Pilot Admin", Role.ADMIN),
-        ("supervisor@pilot.example", "Maya Supervisor", Role.SUPERVISOR),
-        ("agent1@pilot.example", "Aarav Agent", Role.AGENT),
-        ("agent2@pilot.example", "Meera Agent", Role.AGENT),
-        ("client@pilot.example", "Client Viewer", Role.CLIENT_VIEWER),
+        (settings.seed_admin_email.lower(), "Platform Administrator", Role.ADMIN),
+        ("supervisor@pilot.example", "Demo Supervisor", Role.SUPERVISOR),
+        ("agent1@pilot.example", "Demo Agent 01", Role.AGENT),
+        ("agent2@pilot.example", "Demo Agent 02", Role.AGENT),
+        ("client@pilot.example", "Demo Client Viewer", Role.CLIENT_VIEWER),
     ]
     users: list[User] = []
     for email, display_name, role in user_specs:
@@ -35,14 +35,14 @@ def seed_demo(db: Session) -> None:
             db.flush()
         users.append(user)
 
-    campaign = db.scalar(select(Campaign).where(Campaign.tenant_id == tenant.id, Campaign.name == "Customer Care Pilot"))
+    campaign = db.scalar(select(Campaign).where(Campaign.tenant_id == tenant.id, Campaign.name == "HarperValleyBank Evidence Demo"))
     if campaign is None:
-        campaign = Campaign(tenant_id=tenant.id, name="Customer Care Pilot", direction="blended")
+        campaign = Campaign(tenant_id=tenant.id, name="HarperValleyBank Evidence Demo", direction="blended")
         db.add(campaign)
         db.flush()
-    queue = db.scalar(select(WorkQueue).where(WorkQueue.tenant_id == tenant.id, WorkQueue.name == "Pilot Support"))
+    queue = db.scalar(select(WorkQueue).where(WorkQueue.tenant_id == tenant.id, WorkQueue.name == "Evidence Demo Queue"))
     if queue is None:
-        queue = WorkQueue(tenant_id=tenant.id, campaign_id=campaign.id, name="Pilot Support", channels=["voice", "web_chat"])
+        queue = WorkQueue(tenant_id=tenant.id, campaign_id=campaign.id, name="Evidence Demo Queue", channels=["voice", "web_chat"])
         db.add(queue)
         db.flush()
 
@@ -74,21 +74,22 @@ def seed_demo(db: Session) -> None:
         db.add(ClientAccessGrant(tenant_id=tenant.id, user_id=users[4].id, campaign_id=campaign.id))
 
     if db.scalar(select(Script.id).where(Script.tenant_id == tenant.id, Script.campaign_id == campaign.id, Script.active.is_(True))) is None:
-        db.add(Script(tenant_id=tenant.id, campaign_id=campaign.id, name="Customer Care Core", version=1, language="multi", content="Greet the customer, verify the reference, acknowledge the issue, explain the resolution, and recap the next step.", required_steps=["Greet the customer", "Confirm customer identity", "Acknowledge the issue", "Recap the resolution"]))
-    if db.scalar(select(KnowledgeArticle.id).where(KnowledgeArticle.tenant_id == tenant.id, KnowledgeArticle.title == "Delayed dispatch")) is None:
-        db.add(KnowledgeArticle(tenant_id=tenant.id, campaign_id=campaign.id, title="Delayed dispatch", language="multi", content="When dispatch is delayed, share the revised delivery date and send written confirmation by SMS or email.", tags=["delivery", "delay", "order"]))
+        db.add(Script(tenant_id=tenant.id, campaign_id=campaign.id, name="Corpus-derived banking call flow", version=1, language="en", content="Derived from the published HarperValleyBank dialog patterns: greet and identify the bank, understand the caller's task, ask only for task-relevant details, answer from the supplied task metadata, offer further help, and close professionally.", required_steps=["Professional greeting", "Understand the caller task", "Provide the source-backed answer", "Offer further help", "Close professionally"]))
+    if db.scalar(select(KnowledgeArticle.id).where(KnowledgeArticle.tenant_id == tenant.id, KnowledgeArticle.title == "HarperValleyBank evidence boundary")) is None:
+        db.add(KnowledgeArticle(tenant_id=tenant.id, campaign_id=campaign.id, title="HarperValleyBank evidence boundary", language="en", content="Published human-recorded simulated banking calls under CC BY 4.0. These are research-corpus interactions, not production customer calls.", tags=["provenance", "harpervalley", "evidence"]))
 
-    qa_form = db.scalar(select(QAForm).where(QAForm.tenant_id == tenant.id, QAForm.campaign_id == campaign.id, QAForm.name == "Customer Care QA", QAForm.version == 1))
+    qa_form = db.scalar(select(QAForm).where(QAForm.tenant_id == tenant.id, QAForm.campaign_id == campaign.id, QAForm.name == "Corpus-derived Banking QA", QAForm.version == 1))
     if qa_form is None:
-        qa_form = QAForm(tenant_id=tenant.id, campaign_id=campaign.id, name="Customer Care QA", version=1)
+        qa_form = QAForm(tenant_id=tenant.id, campaign_id=campaign.id, name="Corpus-derived Banking QA", version=1)
         db.add(qa_form)
         db.flush()
     if db.scalar(select(QAQuestion.id).where(QAQuestion.form_id == qa_form.id)) is None:
         for position, (label, weight, fatal) in enumerate([
-            ("Professional greeting", 20, False),
-            ("Verified customer or order reference", 30, True),
-            ("Acknowledged the issue with empathy", 20, False),
-            ("Provided and recapped a clear resolution", 30, False),
+            ("Professional greeting and identification", 20, False),
+            ("Understood the caller's stated task", 20, False),
+            ("Provided an answer supported by task metadata", 30, True),
+            ("Offered further help", 15, False),
+            ("Closed the call professionally", 15, False),
         ], start=1):
             db.add(QAQuestion(form_id=qa_form.id, position=position, label=label, guidance=label, weight=weight, fatal=fatal))
     db.commit()

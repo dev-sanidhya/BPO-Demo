@@ -1,0 +1,13 @@
+{
+  "dataset": "HarperValleyBank",
+  "source_repository": "https://github.com/cricketclub/gridspace-stanford-harper-valley",
+  "paper": "https://arxiv.org/abs/2010.13929",
+  "license": "CC-BY-4.0",
+  "evidence_class": "published_human_recorded_simulated_call",
+  "calls": [
+    {"sid":"eb82ec7b5f0944ca","task":"check balance","duration_ms":53282,"caller_partner_rating_10pt":10,"labels":{"script":5,"caller_mos":5,"agent_mos":5}},
+    {"sid":"ff0296d00e5e4184","task":"get branch hours","duration_ms":54063,"caller_partner_rating_10pt":10,"labels":{"script":5,"caller_mos":5,"agent_mos":5}},
+    {"sid":"3a20358e1bfc4a17","task":"replace card","duration_ms":60446,"caller_partner_rating_10pt":7,"labels":{"script":4,"caller_mos":4,"agent_mos":4}},
+    {"sid":"a7ccc3379af44b9f","task":"schedule appointment","duration_ms":91660,"caller_partner_rating_10pt":3,"labels":{"script":4,"caller_mos":5,"agent_mos":4}}
+  ]
+}

@@ -2,6 +2,8 @@
 
 Research date: 2026-08-09. Sources are official vendor product pages or documentation. Vendor claims are recorded as claims, not independently verified benchmarks.
 
+Pricing rechecked: 2026-08-10. Public list prices are reference points, not India enterprise quotes. Genesys currently lists named-user annual plans at USD 75/115/155/240 per user-month for CX 1/2/3/4, with usage and AI-token conditions. Exotel publicly lists smaller business-phone bundles at INR 9,999, INR 19,999, and INR 49,499 with different validity, credits, numbers, and agent limits; its enterprise contact-center and AI pricing remains sales-led. These are not directly equivalent to Aperture's implementation-plus-SaaS pilot.
+
 ## Current Market Bar
 
 | Vendor | Officially presented capabilities relevant to this build | Product implication |
@@ -67,3 +69,4 @@ This product should not claim broader feature superiority over mature enterprise
 - Ameyo omnichannel/on-prem offering: https://www.ameyo.com/product/omni/
 - Ameyo omnichannel features: https://www.ameyo.com/product/omni/features
 - Exotel agent assist: https://exotel.com/products/agent-assist/
+- Exotel public plans: https://exotel.com/pricing/ and https://exotel.com/pricing/business-phone-system/
