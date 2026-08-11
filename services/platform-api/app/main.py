@@ -19,10 +19,10 @@ from .ai import AIProviderError, GroqAI, estimate_asr_cost_micros_inr, estimate_
 from .database import Base, SessionLocal, engine, get_db
 from .dependencies import current_user, require_roles
 from .jobs import start_voice_finalization
-from .models import AgentPresence, AgentStatus, AssistEvent, AuditEvent, Campaign, Channel, ChannelConfig, ChatSession, ClientAccessGrant, Contact, Conversation, ConversationStatus, CostEvent, DurableJob, JobStatus, KnowledgeArticle, Message, QAAnswer, QAEvaluation, QAForm, QAQuestion, QAReview, QueueMember, Recording, Role, Script, SurveyResponse, Tenant, TranscriptSegment, User, VoiceSession, WorkQueue
+from .models import AgentPresence, AgentStatus, AssistEvent, AuditEvent, Campaign, Channel, ChannelConfig, ChatSession, ClientAccessGrant, CoachingAction, Contact, Conversation, ConversationStatus, CostEvent, DurableJob, JobStatus, KnowledgeArticle, Message, QAAnswer, QAEvaluation, QAForm, QAQuestion, QAReview, QueueMember, Recording, Role, Script, SurveyResponse, Tenant, TranscriptSegment, User, VoiceSession, WorkQueue
 from .realtime import realtime_hub
 from .reporting import simple_pdf
-from .schemas import AssignRequest, ChatMessageCreate, ChatStartRequest, ConversationCreate, ConversationView, LoginRequest, PilotSetupUpdate, PresenceUpdate, PresenceView, PrivacyModeUpdate, QAEvaluationCreate, QAFormCreate, QAReviewCreate, SurveySubmit, TokenResponse, UserCreate, UserView, VoiceControlRequest, VoiceDialRequest, WrapUpRequest
+from .schemas import AssignRequest, ChatMessageCreate, ChatStartRequest, CoachingActionCreate, ConversationCreate, ConversationView, LoginRequest, PilotSetupUpdate, PresenceUpdate, PresenceView, PrivacyModeUpdate, QAEvaluationCreate, QAFormCreate, QAReviewCreate, SurveySubmit, TokenResponse, UserCreate, UserView, VoiceControlRequest, VoiceDialRequest, WrapUpRequest
 from .security import create_access_token, decode_access_token, hash_password, verify_password
 from .seed import seed_demo
 
@@ -789,6 +789,57 @@ def qa_evaluation_detail(evaluation_id: str, user: User = Depends(require_roles(
     }
 
 
+@app.get("/analytics/conversations/search")
+def search_conversation_intelligence(q: str = "", user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR, Role.QA_REVIEWER, Role.CLIENT_VIEWER)), db: Session = Depends(get_db)) -> list[dict]:
+    phrase = q.strip()
+    if len(phrase) < 2:
+        return []
+    scoped = scoped_conversation_stmt(user).subquery()
+    matches = db.execute(
+        select(Conversation, TranscriptSegment)
+        .join(scoped, scoped.c.id == Conversation.id)
+        .join(TranscriptSegment, TranscriptSegment.conversation_id == Conversation.id)
+        .where(TranscriptSegment.text.ilike(f"%{phrase}%"))
+        .order_by(Conversation.started_at.desc(), TranscriptSegment.start_ms)
+        .limit(50)
+    ).all()
+    return [{"conversation_id": conversation.id, "channel": conversation.channel.value, "disposition": conversation.disposition, "started_at": conversation.started_at.isoformat(), "speaker": segment.speaker, "text": segment.text, "start_ms": segment.start_ms} for conversation, segment in matches]
+
+
+@app.get("/coaching/actions")
+def list_coaching_actions(user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR, Role.QA_REVIEWER, Role.AGENT)), db: Session = Depends(get_db)) -> list[dict]:
+    stmt = select(CoachingAction, User).join(User, User.id == CoachingAction.agent_user_id).where(CoachingAction.tenant_id == user.tenant_id)
+    if user.role == Role.AGENT:
+        stmt = stmt.where(CoachingAction.agent_user_id == user.id)
+    return [{"id": action.id, "evaluation_id": action.evaluation_id, "agent_id": action.agent_user_id, "agent": agent.display_name, "focus": action.focus, "action_plan": action.action_plan, "status": action.status, "due_at": action.due_at.isoformat() if action.due_at else None, "acknowledged_at": action.acknowledged_at.isoformat() if action.acknowledged_at else None, "created_at": action.created_at.isoformat()} for action, agent in db.execute(stmt.order_by(CoachingAction.created_at.desc()).limit(100))]
+
+
+@app.post("/coaching/actions", status_code=201)
+def create_coaching_action(payload: CoachingActionCreate, user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR, Role.QA_REVIEWER)), db: Session = Depends(get_db)) -> dict:
+    evaluation = db.get(QAEvaluation, payload.evaluation_id)
+    if evaluation is None or evaluation.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="QA evaluation not found")
+    conversation = _authorized_conversation(db, user, evaluation.conversation_id)
+    if conversation.assigned_user_id is None:
+        raise HTTPException(status_code=409, detail="Coaching requires an assigned agent")
+    action = CoachingAction(tenant_id=user.tenant_id, evaluation_id=evaluation.id, agent_user_id=conversation.assigned_user_id, created_by_user_id=user.id, **payload.model_dump(exclude={"evaluation_id"}))
+    db.add(action)
+    audit(db, user, "coaching.action_created", "coaching_action", action.id, {"evaluation_id": evaluation.id, "agent_user_id": conversation.assigned_user_id})
+    db.commit()
+    return {"id": action.id, "status": action.status}
+
+
+@app.post("/coaching/actions/{action_id}/acknowledge")
+def acknowledge_coaching_action(action_id: str, user: User = Depends(require_roles(Role.AGENT)), db: Session = Depends(get_db)) -> dict:
+    action = db.get(CoachingAction, action_id)
+    if action is None or action.tenant_id != user.tenant_id or action.agent_user_id != user.id:
+        raise HTTPException(status_code=404, detail="Coaching action not found")
+    action.status = "acknowledged"; action.acknowledged_at = datetime.now(timezone.utc)
+    audit(db, user, "coaching.action_acknowledged", "coaching_action", action.id)
+    db.commit()
+    return {"id": action.id, "status": action.status}
+
+
 @app.get("/configuration")
 def configuration(user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     tenant = db.get(Tenant, user.tenant_id)
@@ -950,6 +1001,12 @@ def report_summary(channel: Channel | None = None, campaign_id: str | None = Non
         agent_risks = [risk_values[row.id] for row in assigned_rows if row.id in risk_values]
         agent_rows.append({"agent_id": assigned_id, "agent": users.get(assigned_id, "Unassigned agent"), "interactions": len(assigned_rows), "average_qa": round(sum(agent_scores) / len(agent_scores), 1) if agent_scores else None, "average_risk": round(sum(agent_risks) / len(agent_risks), 1) if agent_risks else None, "fatal_flags": sum(item.fatal_triggered for item in evaluations if item.conversation_id in {row.id for row in assigned_rows})})
     agent_rows.sort(key=lambda item: (-item["interactions"], item["agent"]))
+    queue_names = {item.id: item.name for item in db.scalars(select(WorkQueue).where(WorkQueue.tenant_id == user.tenant_id))}
+    queue_rows = []
+    for queue_key in sorted({row.queue_id for row in rows if row.queue_id}):
+        members = [row for row in rows if row.queue_id == queue_key]
+        queue_durations = [max(0, int((row.ended_at - row.started_at).total_seconds())) for row in members if row.ended_at]
+        queue_rows.append({"queue_id": queue_key, "queue": queue_names.get(queue_key, "Unknown queue"), "offered": len(members), "closed": sum(row.status == ConversationStatus.CLOSED for row in members), "currently_waiting": sum(row.status == ConversationStatus.QUEUED for row in members), "average_handle_seconds": round(sum(queue_durations) / len(queue_durations), 1) if queue_durations else None, "service_level": None, "service_level_note": "Queue-entry and answer timestamps are required before SLA can be calculated."})
     return {
         "filters": {"channel": channel.value if channel else None, "campaign_id": campaign_id, "queue_id": queue_id, "agent_id": agent_id},
         "conversation_count": len(rows), "closed_count": sum(row.status == ConversationStatus.CLOSED for row in rows), "active_count": sum(row.status == ConversationStatus.ACTIVE for row in rows), "queued_count": sum(row.status == ConversationStatus.QUEUED for row in rows),
@@ -961,6 +1018,7 @@ def report_summary(channel: Channel | None = None, campaign_id: str | None = Non
         "quality": {"score_distribution": [{"label": key, "count": value} for key, value in score_bands.items()], "risk_distribution": [{"label": key, "count": value} for key, value in risk_bands.items()], "failed_checks": sorted(failed_checks.values(), key=lambda item: (-item["failed"], item["label"]))[:5]},
         "trend": [{"date": key, "interactions": len(items), "average_qa": round(sum(effective_scores[row.id] for row in items if row.id in effective_scores) / sum(row.id in effective_scores for row in items), 1) if any(row.id in effective_scores for row in items) else None} for key, items in sorted(daily.items())],
         "agents": agent_rows,
+        "queues": queue_rows,
     }
 
 

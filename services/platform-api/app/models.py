@@ -352,6 +352,22 @@ class QAReview(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
+class CoachingAction(Base):
+    __tablename__ = "coaching_actions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True, nullable=False)
+    evaluation_id: Mapped[str] = mapped_column(ForeignKey("qa_evaluations.id", ondelete="CASCADE"), index=True, nullable=False)
+    agent_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    created_by_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    focus: Mapped[str] = mapped_column(String(300), nullable=False)
+    action_plan: Mapped[str] = mapped_column(Text, nullable=False)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(30), default="open", nullable=False)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 class Recording(Base):
     __tablename__ = "recordings"
 

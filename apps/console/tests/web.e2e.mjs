@@ -42,6 +42,20 @@ try {
   if (!(await sourceLink.getAttribute("href"))?.includes("gridspace-stanford-harper-valley")) throw new Error("Conversation provenance link is incorrect");
   await portal.screenshot({ path: path.join(evidenceDir, "evidence-conversation-provenance.png") });
 
+  await portal.getByRole("button", { name: /Intelligence/ }).click();
+  await portal.getByRole("heading", { name: /Find the signal behind every interaction/ }).waitFor();
+  await portal.getByLabel("Search conversations").fill("card");
+  await portal.getByRole("button", { name: /Search evidence/ }).click();
+  await portal.getByText("Evidence matches").waitFor();
+  await portal.locator(".search-result").first().waitFor();
+  if (await portal.locator(".search-result").count() < 1) throw new Error("Conversation intelligence returned no evidence matches");
+  await portal.screenshot({ path: path.join(evidenceDir, "evidence-conversation-intelligence.png") });
+
+  await portal.getByRole("button", { name: /Coaching/ }).click();
+  await portal.getByRole("heading", { name: /Turn QA evidence into improvement/ }).waitFor();
+  await portal.getByLabel("Coaching evaluation").waitFor();
+  await portal.screenshot({ path: path.join(evidenceDir, "evidence-coaching-workflow.png") });
+
   await portal.getByRole("button", { name: /Quality/ }).click();
   await portal.getByRole("heading", { name: "Quality review" }).waitFor();
   await portal.locator(".score-list > button").first().waitFor();

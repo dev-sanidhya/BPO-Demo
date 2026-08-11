@@ -147,6 +147,13 @@ class QAReviewCreate(BaseModel):
     reason: str = Field(min_length=5, max_length=2000)
 
 
+class CoachingActionCreate(BaseModel):
+    evaluation_id: str
+    focus: str = Field(min_length=3, max_length=300)
+    action_plan: str = Field(min_length=5, max_length=3000)
+    due_at: datetime | None = None
+
+
 class ChatStartRequest(BaseModel):
     tenant_slug: str = Field(min_length=2, max_length=80)
     widget_key: str = Field(min_length=8, max_length=200)
