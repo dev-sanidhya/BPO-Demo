@@ -26,7 +26,11 @@ from .security import hash_password
 
 SOURCE_URL = "https://github.com/cricketclub/gridspace-stanford-harper-valley"
 PAPER_URL = "https://arxiv.org/abs/2010.13929"
-SIDS = ["eb82ec7b5f0944ca", "ff0296d00e5e4184", "3a20358e1bfc4a17", "a7ccc3379af44b9f"]
+SIDS = [
+    "eb82ec7b5f0944ca", "ff0296d00e5e4184", "3a20358e1bfc4a17", "a7ccc3379af44b9f",
+    "0091a706bc604188", "01f7ec3700424bc0", "02e41649e7c441fd", "03a17cc36d474151",
+    "0002f70f7386445b", "01cefd6f5c044a6f", "010eaccb7a23436f", "00d676d7058c49bb",
+]
 QUESTION_SPECS = [
     ("11111111-1111-4111-8111-111111111111", "Professional greeting and identification", "Use the published human transcript to verify a greeting and bank/agent identification.", 20, False),
     ("22222222-2222-4222-8222-222222222222", "Understood the caller's stated task", "The response must address the task explicitly stated by the caller.", 20, False),

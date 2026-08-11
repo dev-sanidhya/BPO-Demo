@@ -9,8 +9,8 @@ const apiBase = process.env.PLATFORM_API_URL || "http://127.0.0.1:18080";
 const customerUrl = process.env.SIP_CUSTOMER_URL || "http://127.0.0.1:18082/?ext=1003&pass=changeme1003&assist=0&target=2101";
 const password = process.env.PILOT_PASSWORD || "PilotTest123!";
 const evidenceSid = "eb82ec7b5f0944ca";
-const agentAudio = path.join(repoDir, "demo-data", "harper-valley", "audio", "agent", `${evidenceSid}.wav`);
-const callerAudio = path.join(repoDir, "demo-data", "harper-valley", "audio", "caller", `${evidenceSid}.wav`);
+const agentAudio = process.env.SIP_AGENT_AUDIO || path.join(repoDir, "demo-data", "harper-valley", "audio", "agent", `${evidenceSid}.wav`);
+const callerAudio = process.env.SIP_CALLER_AUDIO || path.join(repoDir, "demo-data", "harper-valley", "audio", "caller", `${evidenceSid}.wav`);
 const evidenceDir = path.join(repoDir, "artifacts", "ui");
 await mkdir(evidenceDir, { recursive: true });
 

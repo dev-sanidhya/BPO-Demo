@@ -901,7 +901,67 @@ def report_summary(channel: Channel | None = None, campaign_id: str | None = Non
     evaluations = list(db.scalars(select(QAEvaluation).where(QAEvaluation.conversation_id.in_(ids)))) if ids else []
     actual_surveys = list(db.scalars(select(SurveyResponse).where(SurveyResponse.conversation_id.in_(ids), SurveyResponse.actual_csat.is_not(None)))) if ids else []
     predicted = list(db.scalars(select(SurveyResponse).where(SurveyResponse.conversation_id.in_(ids), SurveyResponse.predicted_satisfaction_risk.is_not(None)))) if ids else []
-    return {"filters": {"channel": channel.value if channel else None, "campaign_id": campaign_id, "queue_id": queue_id, "agent_id": agent_id}, "conversation_count": len(rows), "closed_count": sum(row.status == ConversationStatus.CLOSED for row in rows), "average_qa": round(sum((item.reviewed_score if item.reviewed_score is not None else item.automatic_score) for item in evaluations) / len(evaluations), 1) if evaluations else None, "actual_csat_count": len(actual_surveys), "average_actual_csat": round(sum(item.actual_csat for item in actual_surveys if item.actual_csat) / len(actual_surveys), 1) if actual_surveys else None, "predicted_risk_count": len(predicted), "average_predicted_risk": round(sum(item.predicted_satisfaction_risk for item in predicted if item.predicted_satisfaction_risk is not None) / len(predicted), 1) if predicted else None}
+    effective_scores = {item.conversation_id: item.reviewed_score if item.reviewed_score is not None else item.automatic_score for item in evaluations}
+    evaluation_by_id = {item.id: item for item in evaluations}
+    answers = list(db.scalars(select(QAAnswer).where(QAAnswer.evaluation_id.in_(list(evaluation_by_id))))) if evaluation_by_id else []
+    questions = {item.id: item.label for item in db.scalars(select(QAQuestion).where(QAQuestion.id.in_([answer.question_id for answer in answers])))} if answers else {}
+    users = {item.id: item.display_name for item in db.scalars(select(User).where(User.id.in_([row.assigned_user_id for row in rows if row.assigned_user_id])))}
+
+    def count_rows(values: dict[str, int]) -> list[dict]:
+        return [{"label": key, "count": value} for key, value in sorted(values.items(), key=lambda item: (-item[1], item[0]))]
+
+    by_channel: dict[str, int] = {}
+    by_direction: dict[str, int] = {}
+    by_language: dict[str, int] = {}
+    by_disposition: dict[str, int] = {}
+    by_agent: dict[str, list[Conversation]] = {}
+    daily: dict[str, list[Conversation]] = {}
+    durations: list[int] = []
+    for row in rows:
+        for bucket, key in ((by_channel, row.channel.value), (by_direction, row.direction), (by_language, row.language.upper()), (by_disposition, row.disposition or "Unclassified")):
+            bucket[key] = bucket.get(key, 0) + 1
+        if row.assigned_user_id:
+            by_agent.setdefault(row.assigned_user_id, []).append(row)
+        daily.setdefault(row.started_at.date().isoformat(), []).append(row)
+        if row.ended_at:
+            durations.append(max(0, int((row.ended_at - row.started_at).total_seconds())))
+
+    risk_values = {item.conversation_id: item.predicted_satisfaction_risk for item in predicted}
+    risk_bands = {"Low (0–33)": 0, "Watch (34–66)": 0, "High (67–100)": 0}
+    for risk in risk_values.values():
+        risk_bands["Low (0–33)" if risk <= 33 else "Watch (34–66)" if risk <= 66 else "High (67–100)"] += 1
+    score_bands = {"0–59": 0, "60–79": 0, "80–100": 0}
+    for score in effective_scores.values():
+        score_bands["0–59" if score < 60 else "60–79" if score < 80 else "80–100"] += 1
+    failed_checks: dict[str, dict] = {}
+    for answer in answers:
+        if not answer.passed:
+            label = questions.get(answer.question_id, "Unmapped rubric check")
+            entry = failed_checks.setdefault(label, {"label": label, "failed": 0, "evaluated": 0})
+            entry["failed"] += 1
+    for answer in answers:
+        label = questions.get(answer.question_id, "Unmapped rubric check")
+        if label in failed_checks:
+            failed_checks[label]["evaluated"] += 1
+
+    agent_rows = []
+    for assigned_id, assigned_rows in by_agent.items():
+        agent_scores = [effective_scores[row.id] for row in assigned_rows if row.id in effective_scores]
+        agent_risks = [risk_values[row.id] for row in assigned_rows if row.id in risk_values]
+        agent_rows.append({"agent_id": assigned_id, "agent": users.get(assigned_id, "Unassigned agent"), "interactions": len(assigned_rows), "average_qa": round(sum(agent_scores) / len(agent_scores), 1) if agent_scores else None, "average_risk": round(sum(agent_risks) / len(agent_risks), 1) if agent_risks else None, "fatal_flags": sum(item.fatal_triggered for item in evaluations if item.conversation_id in {row.id for row in assigned_rows})})
+    agent_rows.sort(key=lambda item: (-item["interactions"], item["agent"]))
+    return {
+        "filters": {"channel": channel.value if channel else None, "campaign_id": campaign_id, "queue_id": queue_id, "agent_id": agent_id},
+        "conversation_count": len(rows), "closed_count": sum(row.status == ConversationStatus.CLOSED for row in rows), "active_count": sum(row.status == ConversationStatus.ACTIVE for row in rows), "queued_count": sum(row.status == ConversationStatus.QUEUED for row in rows),
+        "closure_rate": round(sum(row.status == ConversationStatus.CLOSED for row in rows) / len(rows) * 100, 1) if rows else None, "average_handle_seconds": round(sum(durations) / len(durations), 1) if durations else None,
+        "qa_coverage": round(len(evaluations) / len(rows) * 100, 1) if rows else None, "average_qa": round(sum(effective_scores.values()) / len(effective_scores), 1) if effective_scores else None, "fatal_count": sum(item.fatal_triggered for item in evaluations),
+        "actual_csat_count": len(actual_surveys), "average_actual_csat": round(sum(item.actual_csat for item in actual_surveys if item.actual_csat) / len(actual_surveys), 1) if actual_surveys else None,
+        "predicted_risk_count": len(predicted), "average_predicted_risk": round(sum(item.predicted_satisfaction_risk for item in predicted if item.predicted_satisfaction_risk is not None) / len(predicted), 1) if predicted else None,
+        "mix": {"channels": count_rows(by_channel), "directions": count_rows(by_direction), "languages": count_rows(by_language), "dispositions": count_rows(by_disposition)},
+        "quality": {"score_distribution": [{"label": key, "count": value} for key, value in score_bands.items()], "risk_distribution": [{"label": key, "count": value} for key, value in risk_bands.items()], "failed_checks": sorted(failed_checks.values(), key=lambda item: (-item["failed"], item["label"]))[:5]},
+        "trend": [{"date": key, "interactions": len(items), "average_qa": round(sum(effective_scores[row.id] for row in items if row.id in effective_scores) / sum(row.id in effective_scores for row in items), 1) if any(row.id in effective_scores for row in items) else None} for key, items in sorted(daily.items())],
+        "agents": agent_rows,
+    }
 
 
 @app.get("/reports/export.csv")

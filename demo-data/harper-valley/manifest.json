@@ -5,9 +5,17 @@
   "license": "CC-BY-4.0",
   "evidence_class": "published_human_recorded_simulated_call",
   "calls": [
-    {"sid":"eb82ec7b5f0944ca","task":"check balance","duration_ms":53282,"caller_partner_rating_10pt":10,"labels":{"script":5,"caller_mos":5,"agent_mos":5}},
-    {"sid":"ff0296d00e5e4184","task":"get branch hours","duration_ms":54063,"caller_partner_rating_10pt":10,"labels":{"script":5,"caller_mos":5,"agent_mos":5}},
-    {"sid":"3a20358e1bfc4a17","task":"replace card","duration_ms":60446,"caller_partner_rating_10pt":7,"labels":{"script":4,"caller_mos":4,"agent_mos":4}},
-    {"sid":"a7ccc3379af44b9f","task":"schedule appointment","duration_ms":91660,"caller_partner_rating_10pt":3,"labels":{"script":4,"caller_mos":5,"agent_mos":4}}
+    {"sid":"eb82ec7b5f0944ca","task":"check balance","duration_ms":53282,"caller_partner_rating_10pt":10},
+    {"sid":"ff0296d00e5e4184","task":"get branch hours","duration_ms":54063,"caller_partner_rating_10pt":10},
+    {"sid":"3a20358e1bfc4a17","task":"replace card","duration_ms":60446,"caller_partner_rating_10pt":7},
+    {"sid":"a7ccc3379af44b9f","task":"schedule appointment","duration_ms":91660,"caller_partner_rating_10pt":3},
+    {"sid":"0091a706bc604188","task":"check balance","duration_ms":51218,"caller_partner_rating_10pt":10},
+    {"sid":"01f7ec3700424bc0","task":"get branch hours","duration_ms":62591,"caller_partner_rating_10pt":2},
+    {"sid":"02e41649e7c441fd","task":"order checks","duration_ms":86411,"caller_partner_rating_10pt":10},
+    {"sid":"03a17cc36d474151","task":"pay bill","duration_ms":75935,"caller_partner_rating_10pt":10},
+    {"sid":"0002f70f7386445b","task":"replace card","duration_ms":51203,"caller_partner_rating_10pt":10},
+    {"sid":"01cefd6f5c044a6f","task":"reset password","duration_ms":63094,"caller_partner_rating_10pt":10},
+    {"sid":"010eaccb7a23436f","task":"schedule appointment","duration_ms":56501,"caller_partner_rating_10pt":10},
+    {"sid":"00d676d7058c49bb","task":"transfer money","duration_ms":52471,"caller_partner_rating_10pt":10}
   ]
 }

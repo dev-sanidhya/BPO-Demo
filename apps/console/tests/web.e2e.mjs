@@ -46,13 +46,15 @@ try {
   await portal.getByRole("heading", { name: "Quality review" }).waitFor();
   await portal.locator(".score-list > button").first().waitFor();
   const evaluationCount = await portal.locator(".score-list > button").count();
-  if (evaluationCount !== 4) throw new Error(`Expected four Groq voice evaluations, found ${evaluationCount}`);
+  if (evaluationCount < 8) throw new Error(`Expected a varied Groq voice corpus, found ${evaluationCount} evaluations`);
   await portal.getByText("Professional greeting and identification").waitFor();
   await portal.getByRole("button", { name: "Save review" }).waitFor();
   await portal.screenshot({ path: path.join(evidenceDir, "evidence-groq-quality.png") });
 
   await portal.getByRole("button", { name: /Reports/ }).click();
   await portal.getByRole("heading", { name: "Reports & economics" }).waitFor();
+  await portal.getByRole("heading", { name: "Agent comparison", exact: true }).waitFor();
+  await portal.getByRole("heading", { name: "Quality & risk", exact: true }).waitFor();
   await portal.getByRole("heading", { name: "Usage-based cost estimate", exact: true }).waitFor();
   await portal.getByText("this is not an invoice", { exact: false }).waitFor();
   const [csvDownload] = await Promise.all([portal.waitForEvent("download"), portal.getByRole("button", { name: /CSV/ }).click()]);
@@ -96,7 +98,7 @@ try {
 
   await new Promise((resolve) => setTimeout(resolve, 1000));
   if (failures.length) throw new Error(failures.join("\n"));
-  console.log(JSON.stringify({ ok: true, desktopFit, mobilePortalFit, widgetFit, evidenceRecords: 5, groqEvaluations: 4 }));
+  console.log(JSON.stringify({ ok: true, desktopFit, mobilePortalFit, widgetFit, groqEvaluations: evaluationCount }));
   await mobile.close();
   await desktop.close();
 } finally {
