@@ -43,7 +43,7 @@ def ingest(scenario: str, token: str) -> str:
     label = f"Controlled Hindi demo — {scenario.replace('-', ' ')}"
     response = request(token, "POST", "/voice/calls/dial", json={"phone": f"demo-{scenario}", "customer_name": label, "language": manifest["language"]}).json()
     conversation_id = response["conversation"]["id"]
-    upload(token, f"/voice/calls/{conversation_id}/recording", scenario_dir / "stereo-call.wav", {"duration_ms": manifest["duration_ms"]})
+    upload(token, f"/voice/calls/{conversation_id}/recording", scenario_dir / "demo-call.wav", {"duration_ms": manifest["duration_ms"]})
     for segment in manifest["segments"]:
         upload(
             token,

@@ -143,12 +143,14 @@ async def build_scenario(name: str, turns: list[tuple[str, str, str]]) -> dict:
     agent_path = scenario_dir / "agent.wav"
     customer_path = scenario_dir / "customer.wav"
     mix_path = scenario_dir / "stereo-call.wav"
+    mono_path = scenario_dir / "demo-call.wav"
     write_mono_wav(agent_path, bytes(tracks["agent"]))
     write_mono_wav(customer_path, bytes(tracks["customer"]))
     subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(agent_path), "-i", str(customer_path), "-filter_complex", "[0:a][1:a]amerge=inputs=2", "-ac", "2", "-c:a", "pcm_s16le", str(mix_path)], check=True)
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(mix_path), "-ac", "1", "-c:a", "pcm_s16le", str(mono_path)], check=True)
     manifest = {"classification": "controlled_synthetic_demo", "language": SCENARIO_LANGUAGES.get(name, "hi"), "duration_ms": cursor_ms, "segments": segments}
     (scenario_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"scenario": name, "duration_ms": cursor_ms, "recording": str(mix_path)}
+    return {"scenario": name, "duration_ms": cursor_ms, "recording": str(mono_path)}
 
 
 async def main() -> None:
