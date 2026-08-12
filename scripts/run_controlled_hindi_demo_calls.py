@@ -40,8 +40,8 @@ def upload(token: str, path: str, audio_path: Path, data: dict[str, str | int]) 
 def ingest(scenario: str, token: str) -> str:
     scenario_dir = ASSETS / scenario
     manifest = json.loads((scenario_dir / "manifest.json").read_text(encoding="utf-8"))
-    label = "Controlled Hindi demo — compliant resolution" if scenario == "good-resolution" else "Controlled Hindi demo — coaching needed"
-    response = request(token, "POST", "/voice/calls/dial", json={"phone": f"demo-{scenario}", "customer_name": label, "language": "hi"}).json()
+    label = f"Controlled Hindi demo — {scenario.replace('-', ' ')}"
+    response = request(token, "POST", "/voice/calls/dial", json={"phone": f"demo-{scenario}", "customer_name": label, "language": manifest["language"]}).json()
     conversation_id = response["conversation"]["id"]
     upload(token, f"/voice/calls/{conversation_id}/recording", scenario_dir / "stereo-call.wav", {"duration_ms": manifest["duration_ms"]})
     for segment in manifest["segments"]:
@@ -59,11 +59,13 @@ def ingest(scenario: str, token: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wait-seconds", type=int, default=45, help="Time to allow the durable QA worker to complete after ingestion.")
+    parser.add_argument("--agent", default="agent1@pilot.example", help="Seeded agent identity to use for this sequential batch.")
+    parser.add_argument("scenarios", nargs="*", default=["good-resolution", "coaching-needed"], help="Scenario folder names to ingest in sequence.")
     args = parser.parse_args()
     if not ASSETS.is_dir():
         raise SystemExit("Audio assets are missing. Run scripts/generate_controlled_hindi_demo_calls.py first.")
-    token = login("agent1@pilot.example")
-    ids = [ingest(name, token) for name in ("good-resolution", "coaching-needed")]
+    token = login(args.agent)
+    ids = [ingest(name, token) for name in args.scenarios]
     print(f"Waiting {args.wait_seconds}s for durable Groq QA...")
     time.sleep(args.wait_seconds)
     print("Ready to inspect in Supervisor > Conversations and Quality:")

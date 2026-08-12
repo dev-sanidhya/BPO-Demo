@@ -8,6 +8,7 @@ platform can retain speaker attribution during the controlled replay.
 from __future__ import annotations
 
 import asyncio
+import argparse
 import json
 from pathlib import Path
 import shutil
@@ -38,6 +39,62 @@ SCENARIOS = {
         ("agent", "पता नहीं। बाद में कॉल कर लेना।", "hi-IN-SwaraNeural"),
         ("customer", "ठीक है, मैं बहुत निराश हूँ।", "hi-IN-MadhurNeural"),
     ],
+    "partial-resolution": [
+        ("agent", "नमस्ते, ग्राहक सहायता से मीरा बोल रही हूँ। मैं आपकी मदद करती हूँ।", "hi-IN-SwaraNeural"),
+        ("customer", "मेरे रिफंड का अभी तक कोई संदेश नहीं आया है।", "hi-IN-MadhurNeural"),
+        ("agent", "मैंने आपका रिफंड अनुरोध देख लिया है। यह दो कार्य दिवस में पूरा होना चाहिए।", "hi-IN-SwaraNeural"),
+        ("customer", "ठीक है।", "hi-IN-MadhurNeural"),
+    ],
+    "privacy-risk": [
+        ("agent", "नमस्ते, ग्राहक सहायता से मीरा बोल रही हूँ। मैं आपकी मदद करती हूँ।", "hi-IN-SwaraNeural"),
+        ("customer", "मेरे खाते में एक अनजान लेनदेन दिख रहा है।", "hi-IN-MadhurNeural"),
+        ("agent", "पहले अपना पूरा कार्ड नंबर और ओटीपी बता दीजिए, फिर मैं देखती हूँ।", "hi-IN-SwaraNeural"),
+        ("customer", "मुझे यह सुरक्षित नहीं लग रहा।", "hi-IN-MadhurNeural"),
+    ],
+    "professional-escalation": [
+        ("agent", "नमस्ते, ग्राहक सहायता में आपका स्वागत है। मैं मीरा बोल रही हूँ। मैं आपकी समस्या समझना चाहती हूँ।", "hi-IN-SwaraNeural"),
+        ("customer", "मेरी शिकायत तीन दिन से लंबित है और मुझे समाधान चाहिए।", "hi-IN-MadhurNeural"),
+        ("agent", "देरी के लिए क्षमा कीजिए। मैं इसे अभी प्राथमिकता के साथ वरिष्ठ टीम को भेज रही हूँ और आज शाम तक आपको स्थिति की जानकारी दूँगी। क्या मैं किसी और बात में मदद कर सकती हूँ?", "hi-IN-SwaraNeural"),
+        ("customer", "नहीं, धन्यवाद।", "hi-IN-MadhurNeural"),
+    ],
+    "abrupt-close": [
+        ("agent", "नमस्ते, ग्राहक सहायता से मीरा बोल रही हूँ।", "hi-IN-SwaraNeural"),
+        ("customer", "मेरा पैकेज गलत पते पर चला गया है।", "hi-IN-MadhurNeural"),
+        ("agent", "ठीक है, बाद में देखेंगे।", "hi-IN-SwaraNeural"),
+        ("customer", "कृपया कोई शिकायत नंबर तो दीजिए।", "hi-IN-MadhurNeural"),
+        ("agent", "अभी नहीं।", "hi-IN-SwaraNeural"),
+    ],
+    "marathi-resolution": [
+        ("agent", "नमस्कार, ग्राहक सेवेत आपले स्वागत आहे. मी आरोही बोलत आहे. मी कशी मदत करू?", "mr-IN-AarohiNeural"),
+        ("customer", "माझी ऑर्डर अजून आली नाही आणि मला विलंबाचे कारण समजले नाही.", "mr-IN-ManoharNeural"),
+        ("agent", "विलंबाबद्दल क्षमस्व. तुमची ऑर्डर उद्या संध्याकाळपर्यंत पोहोचेल. मी तुम्हाला संदेशाने पुष्टी पाठवते. आणखी काही मदत हवी आहे का?", "mr-IN-AarohiNeural"),
+        ("customer", "नाही, धन्यवाद. माहिती स्पष्ट होती.", "mr-IN-ManoharNeural"),
+    ],
+    "marathi-escalation": [
+        ("agent", "नमस्कार, ग्राहक सेवेत आपले स्वागत आहे. मी आरोही बोलत आहे.", "mr-IN-AarohiNeural"),
+        ("customer", "माझी तक्रार तीन दिवसांपासून प्रलंबित आहे आणि मला तातडीचा उपाय हवा आहे.", "mr-IN-ManoharNeural"),
+        ("agent", "असुविधेबद्दल क्षमस्व. मी ही तक्रार वरिष्ठ टीमकडे तातडीने पाठवत आहे आणि आज संध्याकाळपर्यंत स्थितीची माहिती देईन. आणखी काही मदत हवी आहे का?", "mr-IN-AarohiNeural"),
+        ("customer", "नाही, धन्यवाद.", "mr-IN-ManoharNeural"),
+    ],
+    "hindi-followup-gap": [
+        ("agent", "नमस्ते, ग्राहक सहायता से मीरा बोल रही हूँ। मैं आपकी मदद करती हूँ।", "hi-IN-SwaraNeural"),
+        ("customer", "मेरा रिफंड अभी तक नहीं आया है और मुझे स्थिति जाननी है।", "hi-IN-MadhurNeural"),
+        ("agent", "मैंने अनुरोध देख लिया है। टीम इस पर काम कर रही है।", "hi-IN-SwaraNeural"),
+        ("customer", "मुझे समय सीमा और अगला कदम बताइए।", "hi-IN-MadhurNeural"),
+        ("agent", "अभी मेरे पास और जानकारी नहीं है।", "hi-IN-SwaraNeural"),
+    ],
+    "english-service-recovery": [
+        ("agent", "Hello, you have reached customer support. This is Meera. How may I help you?", "en-IN-NeerjaNeural"),
+        ("customer", "My delivery was missed twice and I need a confirmed resolution today.", "en-IN-PrabhatNeural"),
+        ("agent", "I am sorry for the repeated inconvenience. I have escalated this for priority delivery tomorrow and will send a confirmation today. Is there anything else I can help with?", "en-IN-NeerjaNeural"),
+        ("customer", "No, thank you for taking ownership.", "en-IN-PrabhatNeural"),
+    ],
+}
+
+SCENARIO_LANGUAGES = {
+    "marathi-resolution": "mr",
+    "marathi-escalation": "mr",
+    "english-service-recovery": "en",
 }
 
 
@@ -89,15 +146,19 @@ async def build_scenario(name: str, turns: list[tuple[str, str, str]]) -> dict:
     write_mono_wav(agent_path, bytes(tracks["agent"]))
     write_mono_wav(customer_path, bytes(tracks["customer"]))
     subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(agent_path), "-i", str(customer_path), "-filter_complex", "[0:a][1:a]amerge=inputs=2", "-ac", "2", "-c:a", "pcm_s16le", str(mix_path)], check=True)
-    manifest = {"classification": "controlled_synthetic_demo", "language": "hi", "voices": {"agent": "hi-IN-SwaraNeural", "customer": "hi-IN-MadhurNeural"}, "duration_ms": cursor_ms, "segments": segments}
+    manifest = {"classification": "controlled_synthetic_demo", "language": SCENARIO_LANGUAGES.get(name, "hi"), "duration_ms": cursor_ms, "segments": segments}
     (scenario_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"scenario": name, "duration_ms": cursor_ms, "recording": str(mix_path)}
 
 
 async def main() -> None:
-    if OUTPUT.exists():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("scenarios", nargs="*", default=list(SCENARIOS), choices=list(SCENARIOS))
+    parser.add_argument("--clean", action="store_true", help="Remove all generated controlled-demo assets first.")
+    args = parser.parse_args()
+    if args.clean and OUTPUT.exists():
         shutil.rmtree(OUTPUT)
-    results = [await build_scenario(name, turns) for name, turns in SCENARIOS.items()]
+    results = [await build_scenario(name, SCENARIOS[name]) for name in args.scenarios]
     print(json.dumps(results, ensure_ascii=False, indent=2))
 
 
