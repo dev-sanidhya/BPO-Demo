@@ -89,12 +89,27 @@ SCENARIOS = {
         ("agent", "I am sorry for the repeated inconvenience. I have escalated this for priority delivery tomorrow and will send a confirmation today. Is there anything else I can help with?", "en-IN-NeerjaNeural"),
         ("customer", "No, thank you for taking ownership.", "en-IN-PrabhatNeural"),
     ],
+    "natural-english-resolution": [
+        ("agent", "Hi, thanks for calling customer support. This is Ava. How can I help today?", "en-US-AvaNeural"),
+        ("customer", "Hi Ava. My replacement order is showing as delayed and I need it before the weekend.", "en-US-AndrewNeural"),
+        ("agent", "I understand. I have checked the order and it is now scheduled for delivery tomorrow. I will send the confirmation as soon as we end this call. Is there anything else you need from me?", "en-US-AvaNeural"),
+        ("customer", "No, that solves it. Thanks for being clear about it.", "en-US-AndrewNeural"),
+    ],
+    "natural-english-coaching": [
+        ("agent", "Hello. What is the problem?", "en-US-AvaNeural"),
+        ("customer", "I was charged twice for the same order and I need help getting the duplicate charge reversed.", "en-US-AndrewNeural"),
+        ("agent", "That is not something I can deal with. You will have to wait and see.", "en-US-AvaNeural"),
+        ("customer", "Can you at least tell me what happens next or give me a case number?", "en-US-AndrewNeural"),
+        ("agent", "No, just call again later.", "en-US-AvaNeural"),
+    ],
 }
 
 SCENARIO_LANGUAGES = {
     "marathi-resolution": "mr",
     "marathi-escalation": "mr",
     "english-service-recovery": "en",
+    "natural-english-resolution": "en",
+    "natural-english-coaching": "en",
 }
 
 
