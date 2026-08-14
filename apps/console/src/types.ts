@@ -90,9 +90,14 @@ export interface QAEvaluation {
   reviewed_score: number | null;
   effective_score: number;
   fatal_triggered: boolean;
+  effective_fatal: boolean;
   status: string;
   provider: string;
   model: string;
   summary: string;
+  agent_id: string | null;
+  agent: string;
+  campaign_id: string | null;
+  campaign: string;
   created_at: string;
 }
