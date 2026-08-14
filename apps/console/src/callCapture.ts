@@ -35,7 +35,9 @@ class SpeakerCapture {
       if (this.active) this.startSegment();
     };
     recorder.start();
-    this.timer = window.setTimeout(() => { if (recorder.state === "recording") recorder.stop(); }, 15_000);
+    // Keep the first live transcript and guidance update visible during a natural
+    // customer exchange rather than waiting until the call is nearly over.
+    this.timer = window.setTimeout(() => { if (recorder.state === "recording") recorder.stop(); }, 6_000);
   }
 
   async stop() {

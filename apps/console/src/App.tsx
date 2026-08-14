@@ -2,7 +2,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 import {
   Activity, AudioWaveform as Waveform, BarChart3, BookOpen, CheckCircle2, ChevronRight,
   ClipboardCheck, Clock3, Headphones, Inbox, LayoutDashboard, LockKeyhole,
-  Download, FileText, LogOut, MessageSquareText, MicOff, Pause, Phone, PhoneCall,
+  Download, FileText, LogOut, MessageSquareText, MicOff, Pause, Phone, PhoneCall, PhoneIncoming,
   PhoneOff, Play, Send, Settings, ShieldCheck, Sparkles, UsersRound,
 } from "lucide-react";
 import { api, ApiError, connectRealtime } from "./api";
@@ -187,6 +187,8 @@ function AgentView({ token, user, assigned, queued, onRefresh }: { token: string
   const [error, setError] = useState("");
   const [sipStatus, setSipStatus] = useState<SipStatus>("disabled");
   const [sipDetail, setSipDetail] = useState("Demo media mode");
+  const [incomingCall, setIncomingCall] = useState<{ id: string; remote: string } | null>(null);
+  const [liveAnalysisState, setLiveAnalysisState] = useState<"idle" | "listening" | "processing">("idle");
   const sipRef = useRef<SipPhone | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const captureRef = useRef<CallCapture | null>(null);
@@ -231,6 +233,7 @@ function AgentView({ token, user, assigned, queued, onRefresh }: { token: string
             const result = await api.registerLiveInbound(token, remote, `Live SIP caller ${remote}`, "auto");
             if (!incomingSipAliveRef.current) { await api.rejectVoice(token, result.conversation.id); onRefresh(); return; }
             pendingInboundIdRef.current = result.conversation.id;
+            setIncomingCall({ id: result.conversation.id, remote });
             onRefresh();
           } catch (reason) {
             phoneClient.reject();
@@ -244,6 +247,7 @@ function AgentView({ token, user, assigned, queued, onRefresh }: { token: string
         const pendingId = pendingInboundIdRef.current;
         if (pendingId) {
           pendingInboundIdRef.current = null;
+          setIncomingCall(null);
           void api.rejectVoice(token, pendingId).then(onRefresh).catch(() => onRefresh());
           return;
         }
@@ -257,18 +261,22 @@ function AgentView({ token, user, assigned, queued, onRefresh }: { token: string
           } catch (reason) { setError(reason instanceof Error ? reason.message : "Remote hang-up could not be finalized"); }
         })();
       },
-      onMedia: (remote, local) => {
+    onMedia: (remote, local) => {
         if (remoteAudioRef.current) { remoteAudioRef.current.srcObject = remote; void remoteAudioRef.current.play().catch(() => undefined); }
         if (voiceRef.current?.provider === "groq_external" && !captureRef.current) {
+          setLiveAnalysisState("listening");
           captureRef.current = new CallCapture(remote, local, async (blob, startMs, speaker) => {
             const id = selectedIdRef.current;
             if (!id) return;
+            setLiveAnalysisState("processing");
             try {
               const result = await api.ingestVoiceChunk(token, id, blob, startMs, speaker);
               if (result.guidance_error) setError(`Live guidance provider error: ${result.guidance_error}`);
               await loadConversationRef.current();
             } catch (reason) {
               setError(reason instanceof Error ? `Live AI chunk failed: ${reason.message}` : "Live AI chunk failed");
+            } finally {
+              setLiveAnalysisState("listening");
             }
           });
         }
@@ -290,6 +298,7 @@ function AgentView({ token, user, assigned, queued, onRefresh }: { token: string
         const call = await api.voiceCall(token, id);
         setVoice(call.session); voiceRef.current = call.session;
         pendingInboundIdRef.current = null;
+        setIncomingCall(null);
         incomingSipAliveRef.current = true;
         sipRef.current?.answer();
       }
@@ -299,7 +308,7 @@ function AgentView({ token, user, assigned, queued, onRefresh }: { token: string
   async function reject(id: string) {
     setError("");
     try {
-      if (pendingInboundIdRef.current === id) { pendingInboundIdRef.current = null; incomingSipAliveRef.current = false; sipRef.current?.reject(); }
+      if (pendingInboundIdRef.current === id) { pendingInboundIdRef.current = null; incomingSipAliveRef.current = false; setIncomingCall(null); sipRef.current?.reject(); }
       await api.rejectVoice(token, id); onRefresh();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Interaction could not be rejected"); }
   }
@@ -333,6 +342,15 @@ function AgentView({ token, user, assigned, queued, onRefresh }: { token: string
 
   return <div className="agent-shell">
     <header className="agent-topbar"><div><span className="section-kicker">AGENT WORKSPACE</span><h1>{user.display_name}</h1></div><div className="agent-statuses"><span className={`sip-indicator ${sipStatus}`}><Phone size={14} /> {sipDetail}</span><label className="presence-control"><i className={presence} /><select aria-label="Agent status" value={presence} onChange={(e) => void changePresence(e.target.value)}><option value="available">Available</option><option value="break">On break</option><option value="offline">Offline</option></select></label></div></header>
+    {incomingCall && <div className="incoming-call-overlay" role="dialog" aria-modal="true" aria-label="Incoming voice call">
+      <div className="incoming-call-modal">
+        <div className="incoming-call-icon"><PhoneIncoming size={28} /></div>
+        <span>INCOMING VOICE CALL</span>
+        <h2>{incomingCall.remote}</h2>
+        <p>Live customer is waiting for you to answer.</p>
+        <div className="incoming-call-actions"><button className="incoming-reject" onClick={() => void reject(incomingCall.id)}><PhoneOff size={17} /> Reject</button><button className="incoming-accept" onClick={() => void claim(incomingCall.id)}><Phone size={17} /> Answer call</button></div>
+      </div>
+    </div>}
     <div className="agent-columns">
       <section className="work-list"><div className="work-list-head"><div><h3>My work</h3><span>{activeWork.length} active</span></div><button aria-label="Refresh work" onClick={onRefresh}><Activity size={16} /></button></div>
         {activeWork.map((item) => <button key={item.id} onClick={() => setSelectedId(item.id)} className={`work-item ${selectedId === item.id ? "selected" : ""}`}><div className={`channel-badge ${item.channel}`}>{item.channel === "voice" ? <Phone size={16} /> : <MessageSquareText size={16} />}</div><div><strong>{item.channel === "web_chat" ? "Digital customer" : "Voice customer"}</strong><span>{item.language.toUpperCase()} · {formatTime(item.started_at)}</span></div><StatusPill status={item.status} /></button>)}
@@ -346,6 +364,7 @@ function AgentView({ token, user, assigned, queued, onRefresh }: { token: string
             <audio ref={remoteAudioRef} autoPlay className="remote-call-audio" />
             <div className={`call-orb ${voice?.state || "active"}`}><PhoneCall size={34} /><strong>{voice?.state === "ended" ? "Call complete" : voice?.held ? "On hold" : sipStatus === "calling" ? "Calling" : "Connected"}</strong><span>{selected.language.toUpperCase()} · {window.platformRuntime?.sip?.enabled ? "live Asterisk WebRTC" : voice?.provider.replaceAll("_", " ")}</span></div>
             {voice?.state !== "ended" && <div className="call-controls"><button aria-label={voice?.muted ? "Unmute" : "Mute"} onClick={() => void control(voice?.muted ? "unmute" : "mute")}><MicOff size={18} /><span>{voice?.muted ? "Unmute" : "Mute"}</span></button><button aria-label={voice?.held ? "Resume" : "Hold"} onClick={() => void control(voice?.held ? "resume" : "hold")}>{voice?.held ? <Play size={18} /> : <Pause size={18} />}<span>{voice?.held ? "Resume" : "Hold"}</span></button><button aria-label="Transfer" onClick={() => void control("transfer", "1002")}><UsersRound size={18} /><span>Transfer</span></button><button className="hangup" aria-label="Hang up" onClick={() => void control("hangup")}><PhoneOff size={18} /><span>Hang up</span></button></div>}
+            {voice?.state !== "ended" && liveAnalysisState !== "idle" && <div className={`live-transcript-status ${liveAnalysisState}`}><i />{liveAnalysisState === "processing" ? "Updating transcript and live guidance…" : "Listening for the next transcript update…"}</div>}
             {!!transcript.length && <div className="transcript-panel"><div className="transcript-head"><div><span className="section-kicker">SYNCHRONIZED TRANSCRIPT</span><strong>Speaker-aware conversation</strong></div>{recordingUrl && <audio aria-label="Call recording" controls src={recordingUrl} onTimeUpdate={(event) => setPlayhead(event.currentTarget.currentTime * 1000)} />}</div>{transcript.map((segment) => <button key={segment.id} className={`transcript-row ${playhead >= segment.start_ms && playhead <= segment.end_ms ? "playing" : ""}`}><span>{segment.speaker}</span><p>{segment.text}</p><time>{Math.floor(segment.start_ms / 60000)}:{String(Math.floor(segment.start_ms / 1000) % 60).padStart(2, "0")}</time></button>)}</div>}
           </div>}
           {error && <div className="inline-error">{error}</div>}
