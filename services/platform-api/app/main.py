@@ -11,7 +11,7 @@ import wave
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Response, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from .config import get_settings
@@ -39,6 +39,18 @@ def scoped_conversation_stmt(user: User):
         campaign_ids = select(ClientAccessGrant.campaign_id).where(ClientAccessGrant.user_id == user.id, ClientAccessGrant.tenant_id == user.tenant_id)
         stmt = stmt.where(Conversation.campaign_id.in_(campaign_ids))
     return stmt
+
+
+def campaign_material_stmt(model, conversation: Conversation):
+    """Return only material applicable to this call, preferring its campaign."""
+    stmt = select(model).where(model.tenant_id == conversation.tenant_id, model.active.is_(True))
+    if conversation.campaign_id is None:
+        return stmt.where(model.campaign_id.is_(None))
+    return stmt.where(or_(model.campaign_id == conversation.campaign_id, model.campaign_id.is_(None))).order_by((model.campaign_id == conversation.campaign_id).desc())
+
+
+def effective_fatal(evaluation: QAEvaluation) -> bool:
+    return evaluation.fatal_triggered and evaluation.status != "reviewed_fatal_cleared"
 
 
 @asynccontextmanager
@@ -363,8 +375,8 @@ async def ingest_voice_chunk(
         audit(db, user, "voice.chunk_transcribed", "conversation", conversation.id, {"speaker": speaker, "start_ms": start_ms, "segments": 0, "asr_request_id": result.request_id})
         db.commit()
         return {"segments": [], "assists": [], "detected_language": result.language}
-    script = db.scalar(select(Script).where(Script.tenant_id == user.tenant_id, Script.active.is_(True)).order_by(Script.version.desc()))
-    articles = list(db.scalars(select(KnowledgeArticle).where(KnowledgeArticle.tenant_id == user.tenant_id, KnowledgeArticle.active.is_(True))))
+    script = db.scalar(campaign_material_stmt(Script, conversation).order_by(Script.version.desc()))
+    articles = list(db.scalars(campaign_material_stmt(KnowledgeArticle, conversation)))
     article_payload = [{"title": item.title, "content": item.content, "tags": item.tags} for item in articles]
     retrieved = retrieve_knowledge(" ".join(row["text"] for row in transcript), article_payload)
     try:
@@ -703,6 +715,10 @@ def dashboard_summary(user: User = Depends(require_roles(Role.ADMIN, Role.SUPERV
 
 @app.post("/qa/forms", status_code=201)
 def create_qa_form(payload: QAFormCreate, user: User = Depends(require_roles(Role.ADMIN, Role.QA_REVIEWER)), db: Session = Depends(get_db)) -> dict:
+    if payload.campaign_id:
+        campaign = db.get(Campaign, payload.campaign_id)
+        if campaign is None or campaign.tenant_id != user.tenant_id:
+            raise HTTPException(status_code=400, detail="Campaign not found")
     form = QAForm(tenant_id=user.tenant_id, campaign_id=payload.campaign_id, name=payload.name, version=1)
     db.add(form)
     db.flush()
@@ -721,6 +737,8 @@ def create_qa_evaluation(conversation_id: str, payload: QAEvaluationCreate, user
         raise HTTPException(status_code=404, detail="Conversation not found")
     if form is None or form.tenant_id != user.tenant_id:
         raise HTTPException(status_code=400, detail="QA form not found")
+    if form.campaign_id not in {None, conversation.campaign_id}:
+        raise HTTPException(status_code=400, detail="QA form is not applicable to this conversation campaign")
     question_ids = set(db.scalars(select(QAQuestion.id).where(QAQuestion.form_id == form.id)))
     answer_ids = {answer.question_id for answer in payload.answers}
     if answer_ids != question_ids:
@@ -753,20 +771,30 @@ def review_qa_evaluation(evaluation_id: str, payload: QAReviewCreate, user: User
     if evaluation is None or evaluation.tenant_id != user.tenant_id:
         raise HTTPException(status_code=404, detail="QA evaluation not found")
     previous_score = evaluation.reviewed_score if evaluation.reviewed_score is not None else evaluation.automatic_score
+    if payload.fatal_resolution is not None and not evaluation.fatal_triggered:
+        raise HTTPException(status_code=400, detail="Only an automatic fatal finding can be confirmed or cleared")
     review = QAReview(evaluation_id=evaluation.id, reviewer_user_id=user.id, previous_score=previous_score, reviewed_score=payload.reviewed_score, reason=payload.reason)
     db.add(review)
     evaluation.reviewed_score = payload.reviewed_score
-    evaluation.status = "reviewed"
-    audit(db, user, "qa_evaluation.reviewed", "qa_evaluation", evaluation.id, {"previous_score": previous_score, "reviewed_score": payload.reviewed_score, "reason": payload.reason})
+    evaluation.status = f"reviewed_fatal_{payload.fatal_resolution}" if payload.fatal_resolution else "reviewed"
+    audit(db, user, "qa_evaluation.reviewed", "qa_evaluation", evaluation.id, {"previous_score": previous_score, "reviewed_score": payload.reviewed_score, "fatal_resolution": payload.fatal_resolution, "reason": payload.reason})
     db.commit()
-    return {"id": review.id, "automatic_score": evaluation.automatic_score, "reviewed_score": evaluation.reviewed_score, "status": evaluation.status}
+    return {"id": review.id, "automatic_score": evaluation.automatic_score, "reviewed_score": evaluation.reviewed_score, "fatal_triggered": evaluation.fatal_triggered, "effective_fatal": effective_fatal(evaluation), "status": evaluation.status}
 
 
 @app.get("/qa/evaluations")
-def list_qa_evaluations(user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR, Role.QA_REVIEWER, Role.CLIENT_VIEWER)), db: Session = Depends(get_db)) -> list[dict]:
+def list_qa_evaluations(campaign_id: str | None = None, agent_id: str | None = None, fatal_only: bool = False, sort_by: str = "created_at", user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR, Role.QA_REVIEWER, Role.CLIENT_VIEWER)), db: Session = Depends(get_db)) -> list[dict]:
     scoped = scoped_conversation_stmt(user).subquery()
-    evaluations = db.scalars(select(QAEvaluation).join(scoped, scoped.c.id == QAEvaluation.conversation_id).order_by(QAEvaluation.created_at.desc()).limit(100))
-    return [{"id": evaluation.id, "conversation_id": evaluation.conversation_id, "automatic_score": evaluation.automatic_score, "reviewed_score": evaluation.reviewed_score, "effective_score": evaluation.reviewed_score if evaluation.reviewed_score is not None else evaluation.automatic_score, "fatal_triggered": evaluation.fatal_triggered, "status": evaluation.status, "provider": evaluation.provider, "model": evaluation.model, "summary": evaluation.summary, "created_at": evaluation.created_at.isoformat()} for evaluation in evaluations]
+    stmt = select(QAEvaluation, Conversation, User, Campaign).join(scoped, scoped.c.id == QAEvaluation.conversation_id).join(Conversation, Conversation.id == QAEvaluation.conversation_id).outerjoin(User, User.id == Conversation.assigned_user_id).outerjoin(Campaign, Campaign.id == Conversation.campaign_id)
+    if campaign_id:
+        stmt = stmt.where(Conversation.campaign_id == campaign_id)
+    if agent_id:
+        stmt = stmt.where(Conversation.assigned_user_id == agent_id)
+    if fatal_only:
+        stmt = stmt.where(QAEvaluation.fatal_triggered.is_(True))
+    order = (QAEvaluation.reviewed_score if sort_by == "score" else QAEvaluation.created_at).desc()
+    rows = db.execute(stmt.order_by(order).limit(100)).all()
+    return [{"id": evaluation.id, "conversation_id": evaluation.conversation_id, "automatic_score": evaluation.automatic_score, "reviewed_score": evaluation.reviewed_score, "effective_score": evaluation.reviewed_score if evaluation.reviewed_score is not None else evaluation.automatic_score, "fatal_triggered": evaluation.fatal_triggered, "effective_fatal": effective_fatal(evaluation), "status": evaluation.status, "provider": evaluation.provider, "model": evaluation.model, "summary": evaluation.summary, "agent_id": conversation.assigned_user_id, "agent": agent.display_name if agent else "Unassigned", "campaign_id": conversation.campaign_id, "campaign": campaign.name if campaign else "Unassigned campaign", "created_at": evaluation.created_at.isoformat()} for evaluation, conversation, agent, campaign in rows if not fatal_only or effective_fatal(evaluation)]
 
 
 @app.get("/qa/evaluations/{evaluation_id}")
@@ -782,6 +810,8 @@ def qa_evaluation_detail(evaluation_id: str, user: User = Depends(require_roles(
         "conversation_id": evaluation.conversation_id,
         "automatic_score": evaluation.automatic_score,
         "reviewed_score": evaluation.reviewed_score,
+        "fatal_triggered": evaluation.fatal_triggered,
+        "effective_fatal": effective_fatal(evaluation),
         "status": evaluation.status,
         "summary": evaluation.summary,
         "answers": [{"id": answer.id, "question": question.label, "passed": answer.passed, "score": answer.score, "confidence": answer.confidence, "evidence_quote": answer.evidence_quote, "evidence_start_ms": answer.evidence_start_ms, "evidence_end_ms": answer.evidence_end_ms, "reasoning": answer.reasoning} for answer, question in answers],
@@ -995,12 +1025,36 @@ def report_summary(channel: Channel | None = None, campaign_id: str | None = Non
         if label in failed_checks:
             failed_checks[label]["evaluated"] += 1
 
+    def efficiency(items: list[Conversation]) -> dict:
+        completed = [row for row in items if row.ended_at]
+        handle_seconds = sum(max(0, int((row.ended_at - row.started_at).total_seconds())) for row in completed)
+        voice = [row for row in completed if row.channel == Channel.VOICE]
+        voice_seconds = sum(max(0, int((row.ended_at - row.started_at).total_seconds())) for row in voice)
+        return {
+            "average_handle_seconds": round(handle_seconds / len(completed), 1) if completed else None,
+            "voice_calls": len(voice),
+            "voice_average_handle_seconds": round(voice_seconds / len(voice), 1) if voice else None,
+            # Productive hour is completed handling time, not a paid-shift or staffing metric.
+            "calls_per_active_hour": round(len(voice) * 3600 / voice_seconds, 2) if voice_seconds else None,
+            "interactions_per_active_hour": round(len(completed) * 3600 / handle_seconds, 2) if handle_seconds else None,
+        }
+
     agent_rows = []
     for assigned_id, assigned_rows in by_agent.items():
         agent_scores = [effective_scores[row.id] for row in assigned_rows if row.id in effective_scores]
         agent_risks = [risk_values[row.id] for row in assigned_rows if row.id in risk_values]
-        agent_rows.append({"agent_id": assigned_id, "agent": users.get(assigned_id, "Unassigned agent"), "interactions": len(assigned_rows), "average_qa": round(sum(agent_scores) / len(agent_scores), 1) if agent_scores else None, "average_risk": round(sum(agent_risks) / len(agent_risks), 1) if agent_risks else None, "fatal_flags": sum(item.fatal_triggered for item in evaluations if item.conversation_id in {row.id for row in assigned_rows})})
+        agent_rows.append({"agent_id": assigned_id, "agent": users.get(assigned_id, "Unassigned agent"), "interactions": len(assigned_rows), "average_qa": round(sum(agent_scores) / len(agent_scores), 1) if agent_scores else None, "average_risk": round(sum(agent_risks) / len(agent_risks), 1) if agent_risks else None, "fatal_flags": sum(effective_fatal(item) for item in evaluations if item.conversation_id in {row.id for row in assigned_rows}), **efficiency(assigned_rows)})
     agent_rows.sort(key=lambda item: (-item["interactions"], item["agent"]))
+    campaign_names = {item.id: item.name for item in db.scalars(select(Campaign).where(Campaign.tenant_id == user.tenant_id))}
+    by_campaign: dict[str, list[Conversation]] = {}
+    for row in rows:
+        if row.campaign_id:
+            by_campaign.setdefault(row.campaign_id, []).append(row)
+    campaign_rows = []
+    for campaign_key, campaign_members in by_campaign.items():
+        campaign_scores = [effective_scores[row.id] for row in campaign_members if row.id in effective_scores]
+        campaign_rows.append({"campaign_id": campaign_key, "campaign": campaign_names.get(campaign_key, "Unknown campaign"), "interactions": len(campaign_members), "average_qa": round(sum(campaign_scores) / len(campaign_scores), 1) if campaign_scores else None, "fatal_flags": sum(effective_fatal(item) for item in evaluations if item.conversation_id in {row.id for row in campaign_members}), **efficiency(campaign_members)})
+    campaign_rows.sort(key=lambda item: (-item["interactions"], item["campaign"]))
     queue_names = {item.id: item.name for item in db.scalars(select(WorkQueue).where(WorkQueue.tenant_id == user.tenant_id))}
     queue_rows = []
     for queue_key in sorted({row.queue_id for row in rows if row.queue_id}):
@@ -1011,13 +1065,14 @@ def report_summary(channel: Channel | None = None, campaign_id: str | None = Non
         "filters": {"channel": channel.value if channel else None, "campaign_id": campaign_id, "queue_id": queue_id, "agent_id": agent_id},
         "conversation_count": len(rows), "closed_count": sum(row.status == ConversationStatus.CLOSED for row in rows), "active_count": sum(row.status == ConversationStatus.ACTIVE for row in rows), "queued_count": sum(row.status == ConversationStatus.QUEUED for row in rows),
         "closure_rate": round(sum(row.status == ConversationStatus.CLOSED for row in rows) / len(rows) * 100, 1) if rows else None, "average_handle_seconds": round(sum(durations) / len(durations), 1) if durations else None,
-        "qa_coverage": round(len(evaluations) / len(rows) * 100, 1) if rows else None, "average_qa": round(sum(effective_scores.values()) / len(effective_scores), 1) if effective_scores else None, "fatal_count": sum(item.fatal_triggered for item in evaluations),
+        "qa_coverage": round(len(evaluations) / len(rows) * 100, 1) if rows else None, "average_qa": round(sum(effective_scores.values()) / len(effective_scores), 1) if effective_scores else None, "fatal_count": sum(effective_fatal(item) for item in evaluations), "efficiency": efficiency(rows),
         "actual_csat_count": len(actual_surveys), "average_actual_csat": round(sum(item.actual_csat for item in actual_surveys if item.actual_csat) / len(actual_surveys), 1) if actual_surveys else None,
         "predicted_risk_count": len(predicted), "average_predicted_risk": round(sum(item.predicted_satisfaction_risk for item in predicted if item.predicted_satisfaction_risk is not None) / len(predicted), 1) if predicted else None,
         "mix": {"channels": count_rows(by_channel), "directions": count_rows(by_direction), "languages": count_rows(by_language), "dispositions": count_rows(by_disposition)},
         "quality": {"score_distribution": [{"label": key, "count": value} for key, value in score_bands.items()], "risk_distribution": [{"label": key, "count": value} for key, value in risk_bands.items()], "failed_checks": sorted(failed_checks.values(), key=lambda item: (-item["failed"], item["label"]))[:5]},
         "trend": [{"date": key, "interactions": len(items), "average_qa": round(sum(effective_scores[row.id] for row in items if row.id in effective_scores) / sum(row.id in effective_scores for row in items), 1) if any(row.id in effective_scores for row in items) else None} for key, items in sorted(daily.items())],
         "agents": agent_rows,
+        "campaigns": campaign_rows,
         "queues": queue_rows,
     }
 
@@ -1025,8 +1080,28 @@ def report_summary(channel: Channel | None = None, campaign_id: str | None = Non
 @app.get("/reports/export.csv")
 def export_csv(channel: Channel | None = None, campaign_id: str | None = None, queue_id: str | None = None, agent_id: str | None = None, user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR, Role.QA_REVIEWER, Role.CLIENT_VIEWER)), db: Session = Depends(get_db)) -> Response:
     rows = _report_conversations(db, user, channel, campaign_id, queue_id, agent_id)
+    report = report_summary(channel, campaign_id, queue_id, agent_id, user, db)
+    efficiency = report["efficiency"]
     output = io.StringIO()
     writer = csv.writer(output)
+    writer.writerow(["Report summary"])
+    writer.writerow(["conversations", report["conversation_count"]])
+    writer.writerow(["average_qa", report["average_qa"] if report["average_qa"] is not None else ""])
+    writer.writerow(["average_handle_seconds", efficiency["average_handle_seconds"] if efficiency["average_handle_seconds"] is not None else ""])
+    writer.writerow(["voice_calls", efficiency["voice_calls"]])
+    writer.writerow(["calls_per_active_hour", efficiency["calls_per_active_hour"] if efficiency["calls_per_active_hour"] is not None else ""])
+    writer.writerow([])
+    writer.writerow(["Agent efficiency"])
+    writer.writerow(["agent", "interactions", "average_qa", "voice_calls", "voice_average_handle_seconds", "calls_per_active_hour", "fatal_flags"])
+    for item in report["agents"]:
+        writer.writerow([item["agent"], item["interactions"], item["average_qa"] if item["average_qa"] is not None else "", item["voice_calls"], item["voice_average_handle_seconds"] if item["voice_average_handle_seconds"] is not None else "", item["calls_per_active_hour"] if item["calls_per_active_hour"] is not None else "", item["fatal_flags"]])
+    writer.writerow([])
+    writer.writerow(["Campaign efficiency"])
+    writer.writerow(["campaign", "interactions", "average_qa", "voice_calls", "voice_average_handle_seconds", "calls_per_active_hour", "fatal_flags"])
+    for item in report["campaigns"]:
+        writer.writerow([item["campaign"], item["interactions"], item["average_qa"] if item["average_qa"] is not None else "", item["voice_calls"], item["voice_average_handle_seconds"] if item["voice_average_handle_seconds"] is not None else "", item["calls_per_active_hour"] if item["calls_per_active_hour"] is not None else "", item["fatal_flags"]])
+    writer.writerow([])
+    writer.writerow(["Conversation detail"])
     writer.writerow(["conversation_id", "channel", "direction", "language", "status", "agent_id", "started_at", "ended_at", "disposition"])
     for row in rows:
         writer.writerow([row.id, row.channel.value, row.direction, row.language, row.status.value, row.assigned_user_id or "", row.started_at.isoformat(), row.ended_at.isoformat() if row.ended_at else "", row.disposition or ""])
@@ -1036,7 +1111,13 @@ def export_csv(channel: Channel | None = None, campaign_id: str | None = None, q
 @app.get("/reports/export.pdf")
 def export_pdf(channel: Channel | None = None, campaign_id: str | None = None, queue_id: str | None = None, agent_id: str | None = None, user: User = Depends(require_roles(Role.ADMIN, Role.SUPERVISOR, Role.QA_REVIEWER, Role.CLIENT_VIEWER)), db: Session = Depends(get_db)) -> Response:
     rows = _report_conversations(db, user, channel, campaign_id, queue_id, agent_id)
-    lines = [f"Generated: {datetime.now(timezone.utc).isoformat()}", f"Conversations: {len(rows)}", ""]
+    report = report_summary(channel, campaign_id, queue_id, agent_id, user, db)
+    efficiency = report["efficiency"]
+    lines = [f"Generated: {datetime.now(timezone.utc).isoformat()}", f"Conversations: {len(rows)}", f"Average QA: {report['average_qa'] if report['average_qa'] is not None else 'N/A'}", f"Average handle time: {efficiency['average_handle_seconds'] if efficiency['average_handle_seconds'] is not None else 'N/A'} seconds", f"Voice calls: {efficiency['voice_calls']}", f"Calls per active hour: {efficiency['calls_per_active_hour'] if efficiency['calls_per_active_hour'] is not None else 'N/A'}", "", "Agent efficiency"]
+    lines.extend(f"{item['agent']} | calls {item['voice_calls']} | AHT {item['voice_average_handle_seconds'] if item['voice_average_handle_seconds'] is not None else 'N/A'}s | calls/hr {item['calls_per_active_hour'] if item['calls_per_active_hour'] is not None else 'N/A'} | QA {item['average_qa'] if item['average_qa'] is not None else 'N/A'}" for item in report["agents"])
+    lines.append("Campaign efficiency")
+    lines.extend(f"{item['campaign']} | calls {item['voice_calls']} | AHT {item['voice_average_handle_seconds'] if item['voice_average_handle_seconds'] is not None else 'N/A'}s | calls/hr {item['calls_per_active_hour'] if item['calls_per_active_hour'] is not None else 'N/A'} | QA {item['average_qa'] if item['average_qa'] is not None else 'N/A'}" for item in report["campaigns"])
+    lines.append("Conversation detail")
     lines.extend(f"{row.started_at:%Y-%m-%d %H:%M} | {row.channel.value} | {row.language} | {row.status.value} | {row.disposition or '-'}" for row in rows)
     return Response(simple_pdf("Aperture CX Client Report", lines), media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=aperture-cx-report.pdf"})
 

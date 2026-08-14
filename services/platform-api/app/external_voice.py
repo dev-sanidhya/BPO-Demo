@@ -7,13 +7,21 @@ from pathlib import Path
 import shutil
 import wave
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
 from .ai import GroqAI, estimate_asr_cost_micros_inr, estimate_llm_cost_micros_inr, retrieve_knowledge
 from .config import get_settings
 from .local_voice import voice_fixture_paths
 from .models import AssistEvent, Conversation, CostEvent, KnowledgeArticle, QAAnswer, QAEvaluation, QAForm, QAQuestion, Recording, Script, SurveyResponse, TranscriptSegment
+
+
+def _campaign_scope(statement, model, conversation: Conversation):
+    """Prefer the call's campaign material, with tenant-global material as a fallback."""
+    statement = statement.where(model.tenant_id == conversation.tenant_id, model.active.is_(True))
+    if conversation.campaign_id is None:
+        return statement.where(model.campaign_id.is_(None))
+    return statement.where(or_(model.campaign_id == conversation.campaign_id, model.campaign_id.is_(None))).order_by((model.campaign_id == conversation.campaign_id).desc())
 
 
 def _ensure_recording(db: Session, conversation: Conversation) -> tuple[Recording, Path | None]:
@@ -102,11 +110,11 @@ def finalize_external_voice(db: Session, conversation: Conversation) -> None:
     if not segments:
         raise RuntimeError("Groq returned no speech segments")
 
-    script = db.scalar(select(Script).where(Script.tenant_id == conversation.tenant_id, Script.active.is_(True)).order_by(Script.version.desc()))
-    articles = list(db.scalars(select(KnowledgeArticle).where(KnowledgeArticle.tenant_id == conversation.tenant_id, KnowledgeArticle.active.is_(True))))
+    script = db.scalar(_campaign_scope(select(Script), Script, conversation).order_by(Script.version.desc()))
+    articles = list(db.scalars(_campaign_scope(select(KnowledgeArticle), KnowledgeArticle, conversation)))
     transcript_text = " ".join(item["text"] for item in segments)
     retrieved = retrieve_knowledge(transcript_text, [{"title": item.title, "content": item.content, "tags": item.tags} for item in articles])
-    form = db.scalar(select(QAForm).where(QAForm.tenant_id == conversation.tenant_id, QAForm.active.is_(True)).order_by(QAForm.version.desc()))
+    form = db.scalar(_campaign_scope(select(QAForm), QAForm, conversation).order_by(QAForm.version.desc()))
     questions = list(db.scalars(select(QAQuestion).where(QAQuestion.form_id == form.id).order_by(QAQuestion.position))) if form else []
     question_payload = [{"id": item.id, "label": item.label, "guidance": item.guidance, "weight": item.weight, "fatal": item.fatal} for item in questions]
     analysis = provider.analyze(

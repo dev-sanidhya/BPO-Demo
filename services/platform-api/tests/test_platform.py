@@ -77,11 +77,12 @@ def test_qa_evidence_and_review_preserve_automatic_score(client: TestClient, tok
     reviewed = client.post(
         f"/qa/evaluations/{evaluation.json()['id']}/reviews",
         headers=auth(tokens["supervisor"]),
-        json={"reviewed_score": 55, "reason": "The abbreviated disclosure is acceptable for this pilot."},
+        json={"reviewed_score": 55, "fatal_resolution": "cleared", "reason": "The abbreviated disclosure is acceptable for this pilot."},
     )
     assert reviewed.status_code == 201
     assert reviewed.json()["automatic_score"] == 40
     assert reviewed.json()["reviewed_score"] == 55
+    assert reviewed.json()["effective_fatal"] is False
 
 
 def test_web_chat_routes_through_unified_conversation_and_isolates_agents(client: TestClient, tokens: dict[str, str]) -> None:
@@ -207,8 +208,14 @@ def test_local_voice_controls_recording_transcript_qa_and_exports(client: TestCl
     assert all(answer["evidence_end_ms"] > answer["evidence_start_ms"] for answer in detail.json()["answers"])
     wrapped = client.post(f"/conversations/{conversation_id}/wrap-up", headers=auth(tokens["agent1"]), json={"disposition": "resolved", "summary": "Order delivery confirmed."})
     assert wrapped.json()["status"] == "closed"
-    assert client.get("/reports/export.csv", headers=auth(tokens["client"])).text.startswith("conversation_id,channel")
-    assert client.get("/reports/export.pdf", headers=auth(tokens["client"])).content.startswith(b"%PDF-1.4")
+    csv_export = client.get("/reports/export.csv", headers=auth(tokens["client"]))
+    assert csv_export.status_code == 200
+    assert "calls_per_active_hour" in csv_export.text
+    assert "Conversation detail" in csv_export.text
+    pdf_export = client.get("/reports/export.pdf", headers=auth(tokens["client"]))
+    assert pdf_export.status_code == 200
+    assert pdf_export.content.startswith(b"%PDF-1.4")
+    assert b"Agent efficiency" in pdf_export.content
     voice_summary = client.get("/reports/summary?channel=voice", headers=auth(tokens["client"])).json()
     chat_summary = client.get("/reports/summary?channel=web_chat", headers=auth(tokens["client"])).json()
     assert voice_summary["conversation_count"] == 1
@@ -338,9 +345,19 @@ def test_external_voice_uses_provider_output_and_preserves_actual_csat_boundary(
     evaluations = client.get("/qa/evaluations", headers=auth(tokens["supervisor"])).json()
     evaluation = next(item for item in evaluations if item["conversation_id"] == conversation_id)
     assert evaluation["provider"] == "groq"
+    from app.models import Conversation
+    from datetime import timedelta
+    with SessionLocal() as db:
+        conversation = db.get(Conversation, conversation_id)
+        conversation.started_at = conversation.started_at - timedelta(seconds=60)
+        db.commit()
     report = client.get("/reports/summary?channel=voice", headers=auth(tokens["client"])).json()
     assert report["actual_csat_count"] == 0
     assert report["predicted_risk_count"] == 1
+    assert report["efficiency"]["voice_calls"] >= 1
+    assert report["efficiency"]["voice_average_handle_seconds"] is not None
+    assert report["agents"] and report["agents"][0]["calls_per_active_hour"] is not None
+    assert report["campaigns"] and report["campaigns"][0]["voice_calls"] >= 1
 
 
 def test_admin_can_configure_the_pilot_and_create_an_agent(client: TestClient, tokens: dict[str, str]) -> None:

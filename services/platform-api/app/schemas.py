@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
@@ -145,6 +146,7 @@ class QAEvaluationCreate(BaseModel):
 class QAReviewCreate(BaseModel):
     reviewed_score: int = Field(ge=0, le=100)
     reason: str = Field(min_length=5, max_length=2000)
+    fatal_resolution: Literal["confirmed", "cleared"] | None = None
 
 
 class CoachingActionCreate(BaseModel):
